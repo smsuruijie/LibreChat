@@ -1,17 +1,17 @@
-import React from 'react';
+import { cn } from '~/utils';
 
-export default function EditIcon() {
+export default function EditIcon({ className = 'icon-md', size = '1.2em' }) {
   return (
     <svg
       fill="none"
       strokeWidth="2"
+      xmlns="http://www.w3.org/2000/svg"
       viewBox="0 0 24 24"
       strokeLinecap="round"
       strokeLinejoin="round"
-      className="h-4 w-4"
-      height="1em"
-      width="1em"
-      xmlns="http://www.w3.org/2000/svg"
+      height={size}
+      width={size}
+      className={cn(className)}
     >
       <path
         fillRule="evenodd"

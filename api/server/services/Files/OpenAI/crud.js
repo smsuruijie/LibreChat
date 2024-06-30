@@ -14,9 +14,11 @@ const { logger } = require('~/config');
  * @returns {Promise<OpenAIFile>}
  */
 async function uploadOpenAIFile({ req, file, openai }) {
+  const { height, width } = req.body;
+  const isImage = height && width;
   const uploadedFile = await openai.files.create({
     file: fs.createReadStream(file.path),
-    purpose: FilePurpose.Assistants,
+    purpose: isImage ? FilePurpose.Vision : FilePurpose.Assistants,
   });
 
   logger.debug(
@@ -34,7 +36,7 @@ async function uploadOpenAIFile({ req, file, openai }) {
     await sleep(sleepTime);
   }
 
-  return uploadedFile;
+  return isImage ? { ...uploadedFile, height, width } : uploadedFile;
 }
 
 /**
@@ -60,4 +62,20 @@ async function deleteOpenAIFile(req, file, openai) {
   }
 }
 
-module.exports = { uploadOpenAIFile, deleteOpenAIFile };
+/**
+ * Retrieves a readable stream for a file from local storage.
+ *
+ * @param {string} file_id - The file_id.
+ * @param {OpenAI} openai - The initialized OpenAI client.
+ * @returns {Promise<ReadableStream>} A readable stream of the file.
+ */
+async function getOpenAIFileStream(file_id, openai) {
+  try {
+    return await openai.files.content(file_id);
+  } catch (error) {
+    logger.error('Error getting OpenAI file download stream:', error);
+    throw error;
+  }
+}
+
+module.exports = { uploadOpenAIFile, deleteOpenAIFile, getOpenAIFileStream };

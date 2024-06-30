@@ -1,9 +1,16 @@
+import { EToolResources } from './assistants';
+
 export enum FileSources {
   local = 'local',
   firebase = 'firebase',
+  azure = 'azure',
   openai = 'openai',
   s3 = 's3',
+  vectordb = 'vectordb',
 }
+
+export const checkOpenAIStorage = (source: string) =>
+  source === FileSources.openai || source === FileSources.azure;
 
 export enum FileContext {
   avatar = 'avatar',
@@ -12,6 +19,11 @@ export enum FileContext {
   image_generation = 'image_generation',
   assistants_output = 'assistants_output',
   message_attachment = 'message_attachment',
+  filename = 'filename',
+  updatedAt = 'updatedAt',
+  source = 'source',
+  context = 'context',
+  bytes = 'bytes',
 }
 
 export type EndpointFileConfig = {
@@ -48,6 +60,7 @@ export type TFile = {
   usage: number;
   context?: FileContext;
   source?: FileSources;
+  filterSource?: FileSources;
   width?: number;
   height?: number;
   expiresAt?: string | Date;
@@ -64,6 +77,12 @@ export type AvatarUploadResponse = {
   url: string;
 };
 
+export type SpeechToTextResponse = {
+  text: string;
+};
+
+export type VoiceResponse = string[];
+
 export type UploadMutationOptions = {
   onSuccess?: (data: TFileUpload, variables: FormData, context?: unknown) => void;
   onMutate?: (variables: FormData) => void | Promise<unknown>;
@@ -74,6 +93,24 @@ export type UploadAvatarOptions = {
   onSuccess?: (data: AvatarUploadResponse, variables: FormData, context?: unknown) => void;
   onMutate?: (variables: FormData) => void | Promise<unknown>;
   onError?: (error: unknown, variables: FormData, context?: unknown) => void;
+};
+
+export type SpeechToTextOptions = {
+  onSuccess?: (data: SpeechToTextResponse, variables: FormData, context?: unknown) => void;
+  onMutate?: (variables: FormData) => void | Promise<unknown>;
+  onError?: (error: unknown, variables: FormData, context?: unknown) => void;
+};
+
+export type TextToSpeechOptions = {
+  onSuccess?: (data: ArrayBuffer, variables: FormData, context?: unknown) => void;
+  onMutate?: (variables: FormData) => void | Promise<unknown>;
+  onError?: (error: unknown, variables: FormData, context?: unknown) => void;
+};
+
+export type VoiceOptions = {
+  onSuccess?: (data: VoiceResponse, variables: unknown, context?: unknown) => void;
+  onMutate?: () => void | Promise<unknown>;
+  onError?: (error: unknown, variables: unknown, context?: unknown) => void;
 };
 
 export type DeleteFilesResponse = {
@@ -91,6 +128,7 @@ export type BatchFile = {
 export type DeleteFilesBody = {
   files: BatchFile[];
   assistant_id?: string;
+  tool_resource?: EToolResources;
 };
 
 export type DeleteMutationOptions = {
