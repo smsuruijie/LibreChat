@@ -1,11 +1,16 @@
 import { useState, useMemo, useEffect } from 'react';
 import TextareaAutosize from 'react-textarea-autosize';
-import { TPreset, defaultOrderQuery } from 'librechat-data-provider';
+import { Label, HoverCard, SelectDropDown, HoverCardTrigger } from '@librechat/client';
+import type { Assistant, TPreset } from 'librechat-data-provider';
 import type { TModelSelectProps, Option } from '~/common';
-import { Label, HoverCard, SelectDropDown, HoverCardTrigger } from '~/components/ui';
-import { cn, defaultTextProps, removeFocusOutlines, mapAssistants } from '~/utils';
-import { useLocalize, useDebouncedInput } from '~/hooks';
-import { useListAssistantsQuery } from '~/data-provider';
+import {
+  cn,
+  defaultTextProps,
+  removeFocusRings,
+  mapAssistants,
+  createDropdownSetter,
+} from '~/utils';
+import { useLocalize, useDebouncedInput, useAssistantListMap } from '~/hooks';
 import OptionHover from './OptionHover';
 import { ESide } from '~/common';
 
@@ -16,23 +21,25 @@ export default function Settings({ conversation, setOption, models, readonly }: 
     [localize],
   );
 
-  const { data: assistants = [] } = useListAssistantsQuery(defaultOrderQuery, {
-    select: (res) =>
-      [
-        defaultOption,
-        ...res.data.map(({ id, name }) => ({
-          label: name,
-          value: id,
-        })),
-      ].filter(Boolean),
-  });
-
-  const { data: assistantMap = {} } = useListAssistantsQuery(defaultOrderQuery, {
-    select: (res) => mapAssistants(res.data),
-  });
+  const assistantListMap = useAssistantListMap((res) => mapAssistants(res.data));
 
   const { model, endpoint, assistant_id, endpointType, promptPrefix, instructions } =
     conversation ?? {};
+
+  const currentList = useMemo(
+    () => Object.values(assistantListMap[endpoint ?? ''] ?? {}) as Assistant[],
+    [assistantListMap, endpoint],
+  );
+
+  const assistants = useMemo(() => {
+    const currentAssistants = currentList.map(({ id, name }) => ({
+      label: name,
+      value: id,
+    }));
+
+    return [defaultOption, ...currentAssistants].filter(Boolean);
+  }, [currentList, defaultOption]);
+
   const [onPromptPrefixChange, promptPrefixValue] = useDebouncedInput({
     setOption,
     optionKey: 'promptPrefix',
@@ -45,12 +52,12 @@ export default function Settings({ conversation, setOption, models, readonly }: 
   });
 
   const activeAssistant = useMemo(() => {
-    if (assistant_id) {
-      return assistantMap[assistant_id];
+    if (assistant_id != null && assistant_id) {
+      return assistantListMap[endpoint ?? '']?.[assistant_id] as Assistant | null;
     }
 
     return null;
-  }, [assistant_id, assistantMap]);
+  }, [assistant_id, assistantListMap, endpoint]);
 
   const modelOptions = useMemo(() => {
     return models.map((model) => ({
@@ -63,11 +70,13 @@ export default function Settings({ conversation, setOption, models, readonly }: 
   }, [models, activeAssistant, localize]);
 
   const [assistantValue, setAssistantValue] = useState<Option>(
-    activeAssistant ? { label: activeAssistant.name, value: activeAssistant.id } : defaultOption,
+    activeAssistant != null
+      ? { label: activeAssistant.name ?? '', value: activeAssistant.id }
+      : defaultOption,
   );
 
   useEffect(() => {
-    if (assistantValue && assistantValue.value === '') {
+    if (assistantValue.value === '') {
       setOption('presetOverride')({
         assistant_id: assistantValue.value,
       } as Partial<TPreset>);
@@ -88,7 +97,7 @@ export default function Settings({ conversation, setOption, models, readonly }: 
       return;
     }
 
-    const assistant = assistantMap[value];
+    const assistant = assistantListMap[endpoint ?? '']?.[value] as Assistant | null;
     if (!assistant) {
       setAssistantValue(defaultOption);
       return;
@@ -96,9 +105,12 @@ export default function Settings({ conversation, setOption, models, readonly }: 
 
     setAssistantValue({
       label: assistant.name ?? '',
-      value: assistant.id ?? '',
+      value: assistant.id || '',
     });
     setOption('assistant_id')(assistant.id);
+    if (assistant.model) {
+      setModel(assistant.model);
+    }
   };
 
   const optionEndpoint = endpointType ?? endpoint;
@@ -109,10 +121,11 @@ export default function Settings({ conversation, setOption, models, readonly }: 
         <div className="grid w-full items-center gap-2">
           <SelectDropDown
             value={model ?? ''}
-            setValue={setModel}
+            title={localize('com_ui_model')}
+            setValue={createDropdownSetter(setModel)}
             availableValues={modelOptions}
             disabled={readonly}
-            className={cn(defaultTextProps, 'flex w-full resize-none', removeFocusOutlines)}
+            className={cn(defaultTextProps, 'flex w-full resize-none', removeFocusRings)}
             containerClassName="flex w-full resize-none"
           />
         </div>
@@ -124,10 +137,10 @@ export default function Settings({ conversation, setOption, models, readonly }: 
               <SelectDropDown
                 title={localize('com_endpoint_assistant')}
                 value={assistantValue}
-                setValue={setAssistant}
+                setValue={createDropdownSetter(setAssistant)}
                 availableValues={assistants as Option[]}
                 disabled={readonly}
-                className={cn(defaultTextProps, 'flex w-full resize-none', removeFocusOutlines)}
+                className={cn(defaultTextProps, 'flex w-full resize-none', removeFocusRings)}
                 containerClassName="flex w-full resize-none"
               />
             </div>
@@ -137,38 +150,40 @@ export default function Settings({ conversation, setOption, models, readonly }: 
       </div>
       <div className="col-span-6 flex flex-col items-center justify-start gap-6">
         <div className="grid w-full items-center gap-2">
-          <Label htmlFor="promptPrefix" className="text-left text-sm font-medium">
+          <Label htmlFor="promptPrefix" className="text-start text-sm font-medium">
             {localize('com_endpoint_prompt_prefix_assistants')}{' '}
-            <small className="opacity-40">({localize('com_endpoint_default_blank')})</small>
+            <small className="high-contrast:opacity-100 opacity-40">
+              ({localize('com_endpoint_default_blank')})
+            </small>
           </Label>
           <TextareaAutosize
             id="promptPrefix"
             disabled={readonly}
-            value={promptPrefixValue as string | undefined}
+            value={(promptPrefixValue as string | null | undefined) ?? ''}
             onChange={onPromptPrefixChange}
             placeholder={localize('com_endpoint_prompt_prefix_assistants_placeholder')}
             className={cn(
               defaultTextProps,
-              'dark:bg-gray-700 dark:hover:bg-gray-700/60 dark:focus:bg-gray-700',
-              'flex max-h-[240px] min-h-[80px] w-full resize-none px-3 py-2 ',
+              'flex max-h-[15rem] min-h-[5rem] w-full resize-none px-3 py-2',
             )}
           />
         </div>
         <div className="grid w-full items-center gap-2">
-          <Label htmlFor="instructions" className="text-left text-sm font-medium">
+          <Label htmlFor="instructions" className="text-start text-sm font-medium">
             {localize('com_endpoint_instructions_assistants')}{' '}
-            <small className="opacity-40">({localize('com_endpoint_default_blank')})</small>
+            <small className="high-contrast:opacity-100 opacity-40">
+              ({localize('com_endpoint_default_blank')})
+            </small>
           </Label>
           <TextareaAutosize
             id="instructions"
             disabled={readonly}
-            value={instructionsValue as string | undefined}
+            value={(instructionsValue as string | null | undefined) ?? ''}
             onChange={onInstructionsChange}
             placeholder={localize('com_endpoint_instructions_assistants_placeholder')}
             className={cn(
               defaultTextProps,
-              'dark:bg-gray-700 dark:hover:bg-gray-700/60 dark:focus:bg-gray-700',
-              'flex max-h-[240px] min-h-[80px] w-full resize-none px-3 py-2 ',
+              'flex max-h-[15rem] min-h-[5rem] w-full resize-none px-3 py-2',
             )}
           />
         </div>

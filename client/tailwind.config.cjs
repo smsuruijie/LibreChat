@@ -1,25 +1,25 @@
-// const { fontFamily } = require('tailwindcss/defaultTheme');
+// Semantic colors are declared in
+// packages/client/src/theme/tokens.css, which src/style.css imports. The radius scale and the
+// sans and mono families are theme-owned properties mapped in src/style.css.
+const libreChatTailwindPreset = require('../packages/client/tailwind.preset.cjs');
+const compatibilityColors = require('../packages/client/tailwind.compat.cjs');
 
 /** @type {import('tailwindcss').Config} */
 module.exports = {
-  content: ['./src/**/*.{js,jsx,ts,tsx}'],
+  content: [
+    './src/**/*.{js,jsx,ts,tsx}',
+    // Include component library files
+    '../packages/client/src/**/*.{js,jsx,ts,tsx}',
+    '../packages/chat/src/**/*.{js,jsx,ts,tsx}',
+  ],
   // darkMode: 'class',
   darkMode: ['class'],
+  presets: [libreChatTailwindPreset],
   theme: {
-    // colors: {
-    //   'gpt-dark-gray': '#171717',
-    // },
-    fontFamily: {
-      sans: ['Inter', 'sans-serif'],
-      mono: ['Roboto Mono', 'monospace'],
-    },
-    // fontFamily: {
-    //   sans: ['Söhne', 'sans-serif'],
-    //   mono: ['Söhne Mono', 'monospace'],
-    // },
     extend: {
+      colors: compatibilityColors,
       width: {
-        'authPageWidth': '370px',
+        authPageWidth: '370px',
       },
       keyframes: {
         'accordion-down': {
@@ -30,56 +30,79 @@ module.exports = {
           from: { height: 'var(--radix-accordion-content-height)' },
           to: { height: 0 },
         },
+        /** Radix Collapsible exposes its own height variable, not the accordion one.
+         *  The fade rides along so the rows dissolve instead of squashing. Opening
+         *  decelerates into place; closing accelerates away, because a decelerating
+         *  close stalls over its final pixels before the unmount. */
+        'collapsible-down': {
+          from: { height: 0, opacity: 0 },
+          to: { height: 'var(--radix-collapsible-content-height)', opacity: 1 },
+        },
+        'collapsible-up': {
+          from: { height: 'var(--radix-collapsible-content-height)', opacity: 1 },
+          to: { height: 0, opacity: 0 },
+        },
+        'slide-in-right': {
+          '0%': { transform: 'translateX(calc(100% * var(--dir-sign, 1)))' },
+          '100%': { transform: 'translateX(0)' },
+        },
+        'slide-in-left': {
+          '0%': { transform: 'translateX(calc(-100% * var(--dir-sign, 1)))' },
+          '100%': { transform: 'translateX(0)' },
+        },
+        'slide-out-left': {
+          '0%': { transform: 'translateX(0)' },
+          '100%': { transform: 'translateX(calc(-100% * var(--dir-sign, 1)))' },
+        },
+        'slide-out-right': {
+          '0%': { transform: 'translateX(0)' },
+          '100%': { transform: 'translateX(calc(100% * var(--dir-sign, 1)))' },
+        },
+        'shortcut-shake': {
+          '0%, 100%': { transform: 'translateX(0)' },
+          '25%': { transform: 'translateX(-3px)' },
+          '75%': { transform: 'translateX(3px)' },
+        },
+        /** Named distinctly: `blink` is already taken by keyframes in style.css. */
+        'logo-blink': {
+          '0%, 100%': { opacity: '1' },
+          '50%': { opacity: '0' },
+        },
+        'refresh-link-spin': {
+          from: { transform: 'rotate(0deg)' },
+          to: { transform: 'rotate(360deg)' },
+        },
+        'reset-spin': {
+          from: { transform: 'rotate(0deg)' },
+          to: { transform: 'rotate(-360deg)' },
+        },
       },
       animation: {
+        'fade-in': 'fadeIn 0.5s ease-out forwards',
         'accordion-down': 'accordion-down 0.2s ease-out',
         'accordion-up': 'accordion-up 0.2s ease-out',
-      },
-      colors: {
-        gray: {
-          20: '#ececf1',
-          50: '#f7f7f8',
-          100: '#ececec',
-          200: '#e3e3e3',
-          300: '#cdcdcd',
-          400: '#999696',
-          500: '#686262',
-          600: '#3d3d3f',
-          700: '#262626', // Replacing .dark .dark:bg-gray-700 and .dark .dark:hover:bg-gray-700:hover
-          750: '#333333',
-          800: '#212121', // Replacing .dark .dark:bg-gray-800, .bg-gray-800, and .dark .dark:hover:bg-gray-800\/90
-          900: '#0d0d0d', // Replacing .dark .dark:bg-gray-900, .bg-gray-900, and .dark .dark:hover:bg-gray-900:hover
-        },
-        green: {
-          50: '#f1f9f7',
-          100: '#def2ed',
-          200: '#a6e5d6',
-          300: '#6dc8b9',
-          400: '#41a79d',
-          500: '#10a37f',
-          550: '#349072',
-          600: '#126e6b',
-          700: '#0a4f53',
-          800: '#06373e',
-          900: '#031f29',
-        },
-        'brand-purple': '#ab68ff',
-        'text-primary': 'var(--gray-800)',
-        'text-secondary': 'var(--gray-600)',
-        'text-tertiary': 'var(--gray-500)',
-        'surface-primary': 'var(--white)',
-        'surface-secondary': 'var(--gray-50)',
-        'surface-tertiary': 'var(--gray-100)',
-        'border-light': 'var(--gray-100)',
-        'border-medium': 'var(--gray-200)',
-        'border-heavy': 'var(--gray-300)',
-        'border-xheavy': 'var(--gray-400',
+        'collapsible-down': 'collapsible-down 0.3s cubic-bezier(0, 0, 0.2, 1)',
+        'collapsible-up': 'collapsible-up 0.2s cubic-bezier(0.4, 0, 1, 1)',
+        'slide-in-right': 'slide-in-right 300ms cubic-bezier(0.25, 0.1, 0.25, 1)',
+        'slide-in-left': 'slide-in-left 300ms cubic-bezier(0.25, 0.1, 0.25, 1)',
+        'slide-out-left': 'slide-out-left 300ms cubic-bezier(0.25, 0.1, 0.25, 1)',
+        'slide-out-right': 'slide-out-right 300ms cubic-bezier(0.25, 0.1, 0.25, 1)',
+        'shortcut-shake': 'shortcut-shake 0.25s ease-in-out',
+        'logo-blink': 'logo-blink 3s infinite',
+        'refresh-link-spin': 'refresh-link-spin 650ms cubic-bezier(0.42, 0, 0.58, 1)',
+        'reset-spin': 'reset-spin 500ms cubic-bezier(0.22, 1, 0.36, 1)',
       },
     },
   },
   plugins: [
-    require('tailwindcss-animate'),
-    require('tailwindcss-radix')(),
+    // tailwindcss-radix is gone: its addVariant call produces nothing under Tailwind v4, and
+    // Radix sets the same attributes it keyed off, so callers use `data-[state=open]:` and
+    // `data-[disabled]:` directly. Its last caller was a table mockup nothing rendered, removed
+    // with this upgrade rather than migrated.
+    //
+    // tailwindcss-animate is not listed here: the published preset above registers it, and
+    // Tailwind runs a plugin once per registration, so naming it again would emit every
+    // `animate-in`/`fade-in-*` utility twice.
     // require('@tailwindcss/typography'),
   ],
 };

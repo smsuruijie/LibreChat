@@ -1,63 +1,89 @@
-import * as React from 'react';
-import { ListFilter } from 'lucide-react';
+import { useRef, useState, useEffect, useCallback } from 'react';
+import { useSetAtom } from 'jotai';
+import { filesFamily } from '@librechat/chat/react';
+import { FileContext } from 'librechat-data-provider';
+import { useVirtualizer } from '@tanstack/react-virtual';
 import {
   flexRender,
-  getCoreRowModel,
-  getFilteredRowModel,
-  getPaginationRowModel,
-  getSortedRowModel,
   useReactTable,
+  getCoreRowModel,
+  getSortedRowModel,
+  getFilteredRowModel,
 } from '@tanstack/react-table';
+import {
+  Table,
+  Button,
+  Spinner,
+  TableRow,
+  TableBody,
+  TableCell,
+  TableHead,
+  TrashIcon,
+  FilterInput,
+  TableHeader,
+  useMediaQuery,
+} from '@librechat/client';
 import type {
   ColumnDef,
   SortingState,
   VisibilityState,
   ColumnFiltersState,
 } from '@tanstack/react-table';
-import type { AugmentedColumnDef } from '~/common';
 import type { TFile } from 'librechat-data-provider';
-import {
-  Button,
-  Input,
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-  DropdownMenu,
-  DropdownMenuCheckboxItem,
-  DropdownMenuContent,
-  DropdownMenuTrigger,
-} from '~/components/ui';
+import { ColumnVisibilityDropdown } from './ColumnVisibilityDropdown';
 import { useDeleteFilesFromTable } from '~/hooks/Files';
-import { NewTrashIcon, Spinner } from '~/components/svg';
+import { useLocalize, TranslationKeys } from '~/hooks';
+import { cn } from '~/utils';
 
 interface DataTableProps<TData, TValue> {
   columns: ColumnDef<TData, TValue>[];
   data: TData[];
 }
 
-type Style = { width?: number | string; maxWidth?: number | string; minWidth?: number | string };
+const ESTIMATED_ROW_HEIGHT = 52;
+
+const contextMap: Record<string, TranslationKeys> = {
+  [FileContext.filename]: 'com_ui_name',
+  [FileContext.updatedAt]: 'com_ui_date',
+  [FileContext.filterSource]: 'com_ui_storage',
+  [FileContext.context]: 'com_ui_context',
+  [FileContext.bytes]: 'com_ui_size',
+};
+
+type Style = {
+  width?: number | string;
+  maxWidth?: number | string;
+  minWidth?: number | string;
+  zIndex?: number;
+};
 
 export default function DataTable<TData, TValue>({ columns, data }: DataTableProps<TData, TValue>) {
-  const [isDeleting, setIsDeleting] = React.useState(false);
-  const [rowSelection, setRowSelection] = React.useState({});
-  const [sorting, setSorting] = React.useState<SortingState>([]);
-  const [columnFilters, setColumnFilters] = React.useState<ColumnFiltersState>([]);
-  const [columnVisibility, setColumnVisibility] = React.useState<VisibilityState>({});
+  const localize = useLocalize();
+  const [isDeleting, setIsDeleting] = useState(false);
+  const setFiles = useSetAtom(filesFamily(0));
   const { deleteFiles } = useDeleteFilesFromTable(() => setIsDeleting(false));
+
+  const [rowSelection, setRowSelection] = useState({});
+  const [sorting, setSorting] = useState<SortingState>([]);
+  const isSmallScreen = useMediaQuery('(max-width: 768px)');
+  const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([]);
+  const [columnVisibility, setColumnVisibility] = useState<VisibilityState>({});
+  const scrollRef = useRef<HTMLDivElement>(null);
 
   const table = useReactTable({
     data,
     columns,
+    defaultColumn: {
+      minSize: 0,
+      size: Number.MAX_SAFE_INTEGER,
+      maxSize: Number.MAX_SAFE_INTEGER,
+    },
     onSortingChange: setSorting,
     getCoreRowModel: getCoreRowModel(),
     getSortedRowModel: getSortedRowModel(),
     onColumnFiltersChange: setColumnFilters,
     getFilteredRowModel: getFilteredRowModel(),
     onColumnVisibilityChange: setColumnVisibility,
-    getPaginationRowModel: getPaginationRowModel(),
     onRowSelectionChange: setRowSelection,
     state: {
       sorting,
@@ -67,84 +93,96 @@ export default function DataTable<TData, TValue>({ columns, data }: DataTablePro
     },
   });
 
+  const { rows } = table.getRowModel();
+  const estimateSize = useCallback(() => ESTIMATED_ROW_HEIGHT, []);
+  const getItemKey = useCallback((index: number) => rows[index]?.id ?? index, [rows]);
+  const rowVirtualizer = useVirtualizer({
+    count: rows.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize,
+    getItemKey,
+    overscan: 8,
+  });
+
+  useEffect(() => {
+    if (scrollRef.current) {
+      scrollRef.current.scrollTop = 0;
+    }
+  }, [sorting, columnFilters]);
+
+  const virtualRows = rowVirtualizer.getVirtualItems();
+  const paddingTop = virtualRows[0]?.start ?? 0;
+  const paddingBottom =
+    virtualRows.length > 0
+      ? rowVirtualizer.getTotalSize() - (virtualRows[virtualRows.length - 1]?.end ?? 0)
+      : 0;
+  const visibleColumnCount = table.getVisibleLeafColumns().length;
+
   return (
-    <>
-      <div className="flex items-center gap-4 py-4">
+    <div className="flex h-full flex-col gap-4">
+      <div className="flex flex-wrap items-center gap-2 py-2 sm:gap-4 sm:py-4">
         <Button
-          variant="ghost"
+          variant="outline"
           onClick={() => {
             setIsDeleting(true);
             const filesToDelete = table
               .getFilteredSelectedRowModel()
               .rows.map((row) => row.original);
-            deleteFiles({ files: filesToDelete as TFile[] });
+            deleteFiles({ files: filesToDelete as TFile[], setFiles });
             setRowSelection({});
           }}
-          className="gap-2"
           disabled={!table.getFilteredSelectedRowModel().rows.length || isDeleting}
+          className={cn('min-w-[2.5rem] transition-all duration-200', isSmallScreen && 'px-2 py-1')}
         >
           {isDeleting ? (
-            <Spinner className="ml-2 h-4 w-4" />
+            <Spinner className="size-3.5 sm:size-4" />
           ) : (
-            <NewTrashIcon className="ml-2 h-4 w-4 text-red-400" />
+            <TrashIcon className="text-text-destructive size-3.5 sm:size-4" />
           )}
-          Delete
+          {!isSmallScreen && <span className="ms-2">{localize('com_ui_delete')}</span>}
         </Button>
-        <Input
-          placeholder="Filter files..."
-          value={(table.getColumn('filename')?.getFilterValue() as string) ?? ''}
+        <FilterInput
+          inputId="files-filter"
+          label={localize('com_files_filter')}
+          value={(table.getColumn('filename')?.getFilterValue() as string | undefined) ?? ''}
           onChange={(event) => table.getColumn('filename')?.setFilterValue(event.target.value)}
-          className="max-w-sm dark:border-gray-700"
+          surface="dialog"
+          containerClassName="flex-1"
         />
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Button variant="outline" className="ml-auto">
-              <ListFilter className="h-4 w-4" />
-            </Button>
-          </DropdownMenuTrigger>
-          {/* Filter Menu */}
-          <DropdownMenuContent align="end" className="z-[1001] dark:border-gray-700 dark:bg-black">
-            {table
-              .getAllColumns()
-              .filter((column) => column.getCanHide())
-              .map((column) => {
-                return (
-                  <DropdownMenuCheckboxItem
-                    key={column.id}
-                    className="cursor-pointer capitalize dark:text-white dark:hover:bg-gray-800"
-                    checked={column.getIsVisible()}
-                    onCheckedChange={(value) => column.toggleVisibility(!!value)}
-                  >
-                    {column.id}
-                  </DropdownMenuCheckboxItem>
-                );
-              })}
-          </DropdownMenuContent>
-        </DropdownMenu>
+        <div className="relative focus-within:z-[100]">
+          <ColumnVisibilityDropdown
+            table={table}
+            contextMap={contextMap}
+            isSmallScreen={isSmallScreen}
+          />
+        </div>
       </div>
-      <div className="relative max-h-[25rem] min-h-0 overflow-y-auto rounded-md border border-black/10 pb-4 dark:border-white/10 sm:min-h-[28rem]">
-        <Table className="w-full min-w-[600px] border-separate border-spacing-0">
-          <TableHeader>
+      <div
+        ref={scrollRef}
+        className="relative grid h-full max-h-[calc(100vh-20rem)] min-h-[calc(100vh-20rem)] w-full flex-1 overflow-hidden overflow-x-auto overflow-y-auto rounded-md"
+      >
+        {/* Unwrapped: this div is the scroller the virtualizer observes, so the table
+            must not add its own scrolling wrapper inside it. */}
+        <Table
+          unwrapped
+          aria-rowcount={rows.length > 0 ? rows.length + 1 : undefined}
+          className="w-full min-w-[18.75rem] border-separate border-spacing-0"
+        >
+          <TableHeader sticky>
             {table.getHeaderGroups().map((headerGroup) => (
-              <TableRow key={headerGroup.id}>
-                {headerGroup.headers.map((header, index) => {
-                  const style: Style = { maxWidth: '32px', minWidth: '125px' };
-                  if (header.id === 'filename') {
-                    style.maxWidth = '50%';
-                    style.width = '50%';
-                    style.minWidth = '300px';
-                  }
+              <TableRow key={headerGroup.id} aria-rowindex={1}>
+                {headerGroup.headers.map((header, _index) => {
+                  const size = header.getSize();
+                  const style: Style = {
+                    width: size === Number.MAX_SAFE_INTEGER ? 'auto' : size,
+                  };
 
-                  if (index === 0 && header.id === 'select') {
-                    style.width = '25px';
-                    style.maxWidth = '25px';
-                    style.minWidth = '35px';
-                  }
                   return (
                     <TableHead
                       key={header.id}
-                      className="align-start sticky top-0 rounded-t border-b border-black/10 bg-white px-2 py-1 text-left font-medium text-gray-700 dark:border-white/10 dark:bg-gray-900 dark:text-gray-100 sm:px-4 sm:py-2"
-                      style={style}
+                      size="sm"
+                      className="px-2 whitespace-nowrap sm:px-4"
+                      style={{ ...style }}
                     >
                       {header.isPlaceholder
                         ? null
@@ -155,70 +193,82 @@ export default function DataTable<TData, TValue>({ columns, data }: DataTablePro
               </TableRow>
             ))}
           </TableHeader>
-          <TableBody>
-            {table.getRowModel().rows?.length ? (
-              table.getRowModel().rows.map((row) => (
-                <TableRow
-                  key={row.id}
-                  data-state={row.getIsSelected() && 'selected'}
-                  className="border-b border-black/10 text-left text-gray-600 dark:border-white/10 dark:text-gray-300 [tr:last-child_&]:border-b-0"
-                >
-                  {row.getVisibleCells().map((cell, index) => {
-                    const maxWidth =
-                      (cell.column.columnDef as AugmentedColumnDef<TData, TValue>)?.meta?.size ??
-                      'auto';
+          <TableBody className="w-full">
+            {rows.length ? (
+              <>
+                {paddingTop > 0 && (
+                  <tr aria-hidden="true">
+                    <td colSpan={visibleColumnCount} style={{ height: paddingTop }} />
+                  </tr>
+                )}
+                {virtualRows.map((virtualRow) => {
+                  const row = rows[virtualRow.index];
+                  if (!row) {
+                    return null;
+                  }
+                  return (
+                    <TableRow
+                      key={virtualRow.key}
+                      ref={rowVirtualizer.measureElement}
+                      data-index={virtualRow.index}
+                      aria-rowindex={virtualRow.index + 2}
+                      data-state={row.getIsSelected() && 'selected'}
+                    >
+                      {row.getVisibleCells().map((cell) => {
+                        const size = cell.column.getSize();
+                        const style: Style = {
+                          width: size === Number.MAX_SAFE_INTEGER ? 'auto' : size,
+                        };
 
-                    const style: Style = {};
-                    if (cell.column.id === 'filename') {
-                      style.maxWidth = maxWidth;
-                    } else if (index === 0) {
-                      style.maxWidth = '20px';
-                    }
-
-                    return (
-                      <TableCell
-                        key={cell.id}
-                        className="align-start overflow-x-auto px-2 py-1 text-xs sm:px-4 sm:py-2 sm:text-sm [tr[data-disabled=true]_&]:opacity-50"
-                        style={style}
-                      >
-                        {flexRender(cell.column.columnDef.cell, cell.getContext())}
-                      </TableCell>
-                    );
-                  })}
-                </TableRow>
-              ))
+                        return (
+                          <TableCell
+                            key={cell.id}
+                            size="compact"
+                            className={cn(
+                              'px-2 text-xs sm:px-4 sm:text-sm [tr[data-disabled=true]_&]:opacity-50',
+                              cell.column.id === 'select' ? 'overflow-visible' : 'overflow-x-auto',
+                            )}
+                            style={style}
+                          >
+                            {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                          </TableCell>
+                        );
+                      })}
+                    </TableRow>
+                  );
+                })}
+                {paddingBottom > 0 && (
+                  <tr aria-hidden="true">
+                    <td colSpan={visibleColumnCount} style={{ height: paddingBottom }} />
+                  </tr>
+                )}
+              </>
             ) : (
               <TableRow>
                 <TableCell colSpan={columns.length} className="h-24 text-center">
-                  No results.
+                  {localize('com_files_no_results')}
                 </TableCell>
               </TableRow>
             )}
           </TableBody>
         </Table>
       </div>
-      <div className="ml-4 mr-4 mt-4 flex h-auto items-center justify-end space-x-2 py-4 sm:ml-0 sm:mr-0 sm:h-0">
-        <div className="text-muted-foreground ml-2 flex-1 text-sm">
-          {table.getFilteredSelectedRowModel().rows.length} of{' '}
-          {table.getFilteredRowModel().rows.length} file(s) selected.
+
+      <div className="flex items-center justify-end gap-2 py-4">
+        <div className="text-text-secondary ms-2 flex-1 truncate text-xs sm:ms-4 sm:text-sm">
+          <span className="hidden sm:inline">
+            {localize('com_files_number_selected', {
+              0: `${table.getFilteredSelectedRowModel().rows.length}`,
+              1: `${table.getFilteredRowModel().rows.length}`,
+            })}
+          </span>
+          <span className="sm:hidden">
+            {`${table.getFilteredSelectedRowModel().rows.length}/${
+              table.getFilteredRowModel().rows.length
+            }`}
+          </span>
         </div>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={() => table.previousPage()}
-          disabled={!table.getCanPreviousPage()}
-        >
-          Previous
-        </Button>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={() => table.nextPage()}
-          disabled={!table.getCanNextPage()}
-        >
-          Next
-        </Button>
       </div>
-    </>
+    </div>
   );
 }

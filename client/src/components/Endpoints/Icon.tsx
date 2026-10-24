@@ -1,198 +1,129 @@
-import { EModelEndpoint } from 'librechat-data-provider';
-import UnknownIcon from '~/components/Chat/Menus/Endpoints/UnknownIcon';
-import {
-  Plugin,
-  GPTIcon,
-  UserIcon,
-  PaLMIcon,
-  CodeyIcon,
-  GeminiIcon,
-  AssistantIcon,
-  AnthropicIcon,
-  AzureMinimalIcon,
-  CustomMinimalIcon,
-} from '~/components/svg';
-import { useAuthContext } from '~/hooks/AuthContext';
-import useAvatar from '~/hooks/Messages/useAvatar';
-import { IconProps } from '~/common';
+import React, { memo } from 'react';
+import { useRecoilValue } from 'recoil';
+import { UserIcon, useAvatar, pxToRem } from '@librechat/client';
+import type { IconProps } from '~/common';
+import MessageEndpointIcon from './MessageEndpointIcon';
+import { useLocalize } from '~/hooks';
 import { cn } from '~/utils';
+import store from '~/store';
 
-const Icon: React.FC<IconProps> = (props) => {
-  const { user } = useAuthContext();
-  const {
-    size = 30,
-    isCreatedByUser,
-    button,
-    model = '',
-    endpoint,
-    error,
-    jailbreak,
-    assistantName,
-  } = props;
+type ResolvedAvatar = { type: 'image'; src: string } | { type: 'fallback' };
 
-  const avatarSrc = useAvatar(user);
+/**
+ * Caches the resolved avatar decision per user ID.
+ * Invalidated when `user.avatar` changes (e.g., settings upload).
+ * Tracks failed image URLs so they fall back to SVG permanently for the session.
+ */
+const avatarCache = new Map<
+  string,
+  { avatar: string; avatarSrc: string; resolved: ResolvedAvatar }
+>();
+const failedUrls = new Set<string>();
 
-  if (isCreatedByUser) {
-    const username = user?.name || 'User';
+function resolveAvatar(userId: string, userAvatar: string, avatarSrc: string): ResolvedAvatar {
+  if (!userId) {
+    const imgSrc = userAvatar || avatarSrc;
+    return imgSrc && !failedUrls.has(imgSrc)
+      ? { type: 'image', src: imgSrc }
+      : { type: 'fallback' };
+  }
+
+  const cached = avatarCache.get(userId);
+  if (cached && cached.avatar === userAvatar && cached.avatarSrc === avatarSrc) {
+    return cached.resolved;
+  }
+
+  const imgSrc = userAvatar || avatarSrc;
+  const resolved: ResolvedAvatar =
+    imgSrc && !failedUrls.has(imgSrc) ? { type: 'image', src: imgSrc } : { type: 'fallback' };
+
+  avatarCache.set(userId, { avatar: userAvatar, avatarSrc, resolved });
+  return resolved;
+}
+
+function markAvatarFailed(userId: string, src: string): ResolvedAvatar {
+  failedUrls.add(src);
+  const fallback: ResolvedAvatar = { type: 'fallback' };
+  const cached = avatarCache.get(userId);
+  if (cached) {
+    avatarCache.set(userId, { ...cached, resolved: fallback });
+  }
+  return fallback;
+}
+
+type UserAvatarProps = {
+  size: number;
+  avatar: string;
+  avatarSrc: string;
+  userId: string;
+  username: string;
+  className?: string;
+};
+
+const UserAvatar = memo(
+  ({ size, avatar, avatarSrc, userId, username, className }: UserAvatarProps) => {
+    const [resolved, setResolved] = React.useState(() => resolveAvatar(userId, avatar, avatarSrc));
+
+    React.useEffect(() => {
+      setResolved(resolveAvatar(userId, avatar, avatarSrc));
+    }, [userId, avatar, avatarSrc]);
 
     return (
       <div
         title={username}
-        style={{
-          width: size,
-          height: size,
-        }}
-        className={cn('relative flex items-center justify-center', props.className ?? '')}
+        style={{ width: pxToRem(size), height: pxToRem(size) }}
+        className={cn('relative flex items-center justify-center', className ?? '')}
       >
-        {!user?.avatar && !user?.username ? (
+        {resolved.type === 'image' ? (
+          <img
+            className="rounded-full"
+            src={resolved.src}
+            alt="avatar"
+            onError={() => setResolved(markAvatarFailed(userId, resolved.src))}
+          />
+        ) : (
           <div
             style={{
-              backgroundColor: 'rgb(121, 137, 255)',
-              width: '20px',
-              height: '20px',
-              boxShadow: 'rgba(240, 246, 252, 0.1) 0px 0px 0px 1px',
+              width: pxToRem(20),
+              height: pxToRem(20),
             }}
-            className="relative flex h-9 w-9 items-center justify-center rounded-sm p-1 text-white"
+            className="bg-avatar-fill text-avatar-text ring-avatar-edge/10 relative flex h-9 w-9 items-center justify-center rounded-sm p-1 ring-1"
           >
             <UserIcon />
           </div>
-        ) : (
-          <img className="rounded-full" src={user?.avatar || avatarSrc} alt="avatar" />
         )}
       </div>
     );
+  },
+);
+
+UserAvatar.displayName = 'UserAvatar';
+
+const Icon: React.FC<IconProps> = memo((props) => {
+  /** Same reason as SteerPart: this renders on the unauthenticated share route,
+   *  where `useAuthContext` throws. The atom is the same value in the app. */
+  const user = useRecoilValue(store.user);
+  const { size = 30, isCreatedByUser } = props;
+
+  const avatarSrc = useAvatar(user);
+  const localize = useLocalize();
+
+  if (isCreatedByUser) {
+    const username = user?.name ?? user?.username ?? localize('com_nav_user');
+    return (
+      <UserAvatar
+        size={size}
+        avatarSrc={avatarSrc}
+        username={username}
+        userId={user?.id ?? ''}
+        avatar={user?.avatar ?? ''}
+        className={props.className}
+      />
+    );
   }
+  return <MessageEndpointIcon {...props} />;
+});
 
-  const endpointIcons = {
-    [EModelEndpoint.assistants]: {
-      icon: props.iconURL ? (
-        <div className="relative flex h-6 w-6 items-center justify-center">
-          <div
-            title={assistantName}
-            style={{
-              width: size,
-              height: size,
-            }}
-            className={cn('overflow-hidden rounded-full', props.className ?? '')}
-          >
-            <img
-              className="shadow-stroke h-full w-full object-cover"
-              src={props.iconURL}
-              alt={assistantName}
-              style={{ height: '80', width: '80' }}
-            />
-          </div>
-        </div>
-      ) : (
-        <div className="h-6 w-6">
-          <div className="shadow-stroke flex h-6 w-6 items-center justify-center overflow-hidden rounded-full">
-            <AssistantIcon className="h-2/3 w-2/3 text-gray-400" />
-          </div>
-        </div>
-      ),
-      name: endpoint,
-    },
-    [EModelEndpoint.azureOpenAI]: {
-      icon: <AzureMinimalIcon size={size * 0.5555555555555556} />,
-      bg: 'linear-gradient(0.375turn, #61bde2, #4389d0)',
-      name: 'ChatGPT',
-    },
-    [EModelEndpoint.openAI]: {
-      icon: <GPTIcon size={size * 0.5555555555555556} />,
-      bg:
-        typeof model === 'string' && model.toLowerCase().includes('gpt-4') ? '#AB68FF' : '#19C37D',
-      name: 'ChatGPT',
-    },
-    [EModelEndpoint.gptPlugins]: {
-      icon: <Plugin size={size * 0.7} />,
-      bg: `rgba(69, 89, 164, ${button ? 0.75 : 1})`,
-      name: 'Plugins',
-    },
-    [EModelEndpoint.google]: {
-      icon: model?.toLowerCase()?.includes('code') ? (
-        <CodeyIcon size={size * 0.75} />
-      ) : model?.toLowerCase()?.includes('gemini') ? (
-        <GeminiIcon size={size * 0.7} />
-      ) : (
-        <PaLMIcon size={size * 0.7} />
-      ),
-      name: model?.toLowerCase()?.includes('code')
-        ? 'Codey'
-        : model?.toLowerCase()?.includes('gemini')
-          ? 'Gemini'
-          : 'PaLM2',
-    },
-    [EModelEndpoint.anthropic]: {
-      icon: <AnthropicIcon size={size * 0.5555555555555556} />,
-      bg: '#d09a74',
-      name: 'Claude',
-    },
-    [EModelEndpoint.bingAI]: {
-      icon: jailbreak ? (
-        <img src="/assets/bingai-jb.png" alt="Bing Icon" />
-      ) : (
-        <img src="/assets/bingai.png" alt="Sydney Icon" />
-      ),
-      name: jailbreak ? 'Sydney' : 'BingAI',
-    },
-    [EModelEndpoint.chatGPTBrowser]: {
-      icon: <GPTIcon size={size * 0.5555555555555556} />,
-      bg:
-        typeof model === 'string' && model.toLowerCase().includes('gpt-4')
-          ? '#AB68FF'
-          : `rgba(0, 163, 255, ${button ? 0.75 : 1})`,
-      name: 'ChatGPT',
-    },
-    [EModelEndpoint.custom]: {
-      icon: <CustomMinimalIcon size={size * 0.7} />,
-      name: 'Custom',
-    },
-    null: { icon: <GPTIcon size={size * 0.7} />, bg: 'grey', name: 'N/A' },
-    default: {
-      icon: (
-        <div className="h-6 w-6">
-          <div className="overflow-hidden rounded-full">
-            <UnknownIcon
-              iconURL={props.iconURL}
-              endpoint={endpoint ?? ''}
-              className="h-full w-full object-contain"
-              context="message"
-            />
-          </div>
-        </div>
-      ),
-      name: endpoint,
-    },
-  };
-
-  const { icon, bg, name } =
-    endpoint && endpointIcons[endpoint] ? endpointIcons[endpoint] : endpointIcons.default;
-
-  if (endpoint === EModelEndpoint.assistants) {
-    return icon;
-  }
-
-  return (
-    <div
-      title={name}
-      style={{
-        background: bg || 'transparent',
-        width: size,
-        height: size,
-      }}
-      className={cn(
-        'relative flex h-9 w-9 items-center justify-center rounded-sm p-1 text-white',
-        props.className || '',
-      )}
-    >
-      {icon}
-      {error && (
-        <span className="absolute right-0 top-[20px] -mr-2 flex h-3 w-3 items-center justify-center rounded-full border border-white bg-red-500 text-[10px] text-white">
-          !
-        </span>
-      )}
-    </div>
-  );
-};
+Icon.displayName = 'Icon';
 
 export default Icon;

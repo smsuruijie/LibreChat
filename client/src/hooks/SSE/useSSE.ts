@@ -1,569 +1,178 @@
+import { useEffect, useState } from 'react';
 import { v4 } from 'uuid';
-import { useSetRecoilState } from 'recoil';
-import { useParams } from 'react-router-dom';
+import { useStore, useSetAtom } from 'jotai';
 import { useQueryClient } from '@tanstack/react-query';
-import { useEffect, useState, useCallback } from 'react';
-import {
-  /* @ts-ignore */
-  SSE,
-  QueryKeys,
-  EndpointURLs,
-  Constants,
-  createPayload,
-  tPresetSchema,
-  tMessageSchema,
-  EModelEndpoint,
-  tConvoUpdateSchema,
-  removeNullishValues,
-} from 'librechat-data-provider';
-import { useGetUserBalance, useGetStartupConfig } from 'librechat-data-provider/react-query';
+import { abortScrollFamily, showStopButtonByIndex } from '@librechat/chat/react';
+import { startedAsNewConversation, buildCreatedInitialResponse } from '@librechat/chat';
+import { StepEvents, createPayload, removeNullishValues } from 'librechat-data-provider';
 import type {
-  TResPlugin,
+  Agents,
   TMessage,
-  TConversation,
+  TPayload,
+  ChatEvent,
+  TAttachment,
   TSubmission,
-  ConversationData,
+  ChatErrorData,
+  ChatFinalFrame,
+  EventSubmission,
 } from 'librechat-data-provider';
-import {
-  addConversation,
-  deleteConversation,
-  updateConversation,
-  getConversationById,
-} from '~/utils';
-import { useGenTitleMutation } from '~/data-provider';
-import useContentHandler from './useContentHandler';
-import { useAuthContext } from '../AuthContext';
-import useChatHelpers from '../useChatHelpers';
-import useSetStorage from '../useSetStorage';
-import store from '~/store';
+import type { EventHandlerParams } from './useEventHandlers';
+import type { TResData, TFinalResData } from '~/common';
+import { clearComposerDrafts, applyPendingAction, findPendingActionMessageIndex } from '~/utils';
+import { pendingApprovalActionFamily } from '~/components/Chat/approval/state';
+import { useChatTransport } from '~/Providers/ChatTransportContext';
+import { useChatSettings } from '~/Providers/ChatSettingsContext';
+import { reopenTermsOnRefusal } from '~/utils/terms';
+import { useGetUserBalance } from '~/data-provider';
+import useEventHandlers from './useEventHandlers';
+import useUsageHandler from './useUsageHandler';
+import useLocalize from '~/hooks/useLocalize';
+import { activeRunFamily } from './atoms';
 
-type TResData = {
-  plugin?: TResPlugin;
-  final?: boolean;
-  initial?: boolean;
-  previousMessages?: TMessage[];
-  requestMessage: TMessage;
-  responseMessage: TMessage;
-  conversation: TConversation;
-  conversationId?: string;
-  runMessages?: TMessage[];
-};
+type ChatHelpers = Pick<
+  EventHandlerParams,
+  'setMessages' | 'getMessages' | 'setConversation' | 'setIsSubmitting' | 'newConversation'
+>;
 
-type TSyncData = {
-  sync: boolean;
-  thread_id: string;
-  messages?: TMessage[];
-  requestMessage: TMessage;
-  responseMessage: TMessage;
-  conversationId: string;
-};
+type EventHandlers = ReturnType<typeof useEventHandlers>;
+type TSyncData = Parameters<EventHandlers['syncHandler']>[0];
+/** The handlers predate the wire types and accept a narrower payload; these
+ * frames reached them unchanged before the transport existed. */
+type TStepEvent = Parameters<EventHandlers['stepHandler']>[0];
 
-export default function useSSE(submission: TSubmission | null, index = 0) {
-  const setStorage = useSetStorage();
-  const queryClient = useQueryClient();
-  const genTitle = useGenTitleMutation();
+export default function useSSE(
+  submission: TSubmission | null,
+  chatHelpers: ChatHelpers,
+  isAddedRequest = false,
+  runIndex = 0,
+) {
+  const jotaiStore = useStore();
+  const setActiveRunId = useSetAtom(activeRunFamily(runIndex));
 
-  const { conversationId: paramId } = useParams();
-  const { token, isAuthenticated } = useAuthContext();
+  const { auth, config } = useChatSettings();
+  const { token, isAuthenticated = false } = auth;
+  const transport = useChatTransport();
   const [completed, setCompleted] = useState(new Set());
-  const setShowStopButton = useSetRecoilState(store.showStopButtonByIndex(index));
+  const setAbortScroll = useSetAtom(abortScrollFamily(runIndex));
+  const setShowStopButton = useSetAtom(showStopButtonByIndex(runIndex));
+
+  const { setMessages, getMessages, setConversation, setIsSubmitting, newConversation } =
+    chatHelpers;
 
   const {
+    clearStepMaps,
+    stepHandler,
+    syncHandler,
+    finalHandler,
+    errorHandler,
+    messageHandler,
+    contentHandler,
+    createdHandler,
+    titleHandler,
+    attachmentHandler,
+    abortConversation,
+    cancelPendingDeltaFlush,
+    flushPendingDeltas,
+  } = useEventHandlers({
     setMessages,
     getMessages,
+    setCompleted,
+    isAddedRequest,
+    runIndex,
     setConversation,
     setIsSubmitting,
     newConversation,
-    resetLatestMessage,
-  } = useChatHelpers(index, paramId);
-  const contentHandler = useContentHandler({ setMessages, getMessages });
-
-  const { data: startupConfig } = useGetStartupConfig();
-  const balanceQuery = useGetUserBalance({
-    enabled: !!isAuthenticated && startupConfig?.checkBalance,
+    setShowStopButton,
   });
 
-  const messageHandler = useCallback(
-    (data: string, submission: TSubmission) => {
-      const {
-        messages,
-        message,
-        plugin,
-        plugins,
-        initialResponse,
-        isRegenerate = false,
-      } = submission;
-
-      if (isRegenerate) {
-        setMessages([
-          ...messages,
-          {
-            ...initialResponse,
-            text: data,
-            parentMessageId: message?.overrideParentMessageId ?? null,
-            messageId: message?.overrideParentMessageId + '_',
-            plugin: plugin ?? null,
-            plugins: plugins ?? [],
-            // unfinished: true
-          },
-        ]);
-      } else {
-        setMessages([
-          ...messages,
-          message,
-          {
-            ...initialResponse,
-            text: data,
-            parentMessageId: message?.messageId,
-            messageId: message?.messageId + '_',
-            plugin: plugin ?? null,
-            plugins: plugins ?? [],
-            // unfinished: true
-          },
-        ]);
-      }
-    },
-    [setMessages],
-  );
-
-  const cancelHandler = useCallback(
-    (data: TResData, submission: TSubmission) => {
-      const { requestMessage, responseMessage, conversation } = data;
-      const { messages, isRegenerate = false } = submission;
-
-      const convoUpdate = conversation ?? submission.conversation;
-
-      // update the messages
-      if (isRegenerate) {
-        const messagesUpdate = [...messages, responseMessage].filter((msg) => msg);
-        setMessages(messagesUpdate);
-      } else {
-        const messagesUpdate = [...messages, requestMessage, responseMessage].filter((msg) => msg);
-        setMessages(messagesUpdate);
-      }
-
-      const isNewConvo = conversation.conversationId !== submission.conversation.conversationId;
-      if (isNewConvo) {
-        queryClient.setQueryData<ConversationData>([QueryKeys.allConversations], (convoData) => {
-          if (!convoData) {
-            return convoData;
-          }
-          return deleteConversation(convoData, submission.conversation.conversationId as string);
-        });
-      }
-
-      // refresh title
-      if (isNewConvo && requestMessage?.parentMessageId === Constants.NO_PARENT) {
-        setTimeout(() => {
-          genTitle.mutate({ conversationId: convoUpdate.conversationId as string });
-        }, 2500);
-      }
-
-      setConversation((prevState) => {
-        const update = {
-          ...prevState,
-          ...convoUpdate,
-        };
-
-        setStorage(update);
-        return update;
-      });
-
-      setIsSubmitting(false);
-    },
-    [setMessages, setConversation, setStorage, genTitle, queryClient, setIsSubmitting],
-  );
-
-  const syncHandler = useCallback(
-    (data: TSyncData, submission: TSubmission) => {
-      const { conversationId, thread_id, responseMessage, requestMessage } = data;
-      const { initialResponse, messages: _messages, message } = submission;
-
-      const messages = _messages.filter((msg) => msg.messageId !== message.messageId);
-
-      setMessages([
-        ...messages,
-        requestMessage,
-        {
-          ...initialResponse,
-          ...responseMessage,
-        },
-      ]);
-
-      let update = {} as TConversation;
-      setConversation((prevState) => {
-        update = tConvoUpdateSchema.parse({
-          ...prevState,
-          conversationId,
-          thread_id,
-          messages: [requestMessage.messageId, responseMessage.messageId],
-        }) as TConversation;
-
-        setStorage(update);
-        return update;
-      });
-
-      queryClient.setQueryData<ConversationData>([QueryKeys.allConversations], (convoData) => {
-        if (!convoData) {
-          return convoData;
-        }
-        if (requestMessage.parentMessageId === Constants.NO_PARENT) {
-          return addConversation(convoData, update);
-        } else {
-          return updateConversation(convoData, update);
-        }
-      });
-
-      setShowStopButton(true);
-
-      resetLatestMessage();
-    },
-    [setMessages, setConversation, setStorage, queryClient, setShowStopButton, resetLatestMessage],
-  );
-
-  const createdHandler = useCallback(
-    (data: TResData, submission: TSubmission) => {
-      const { messages, message, initialResponse, isRegenerate = false } = submission;
-
-      if (isRegenerate) {
-        setMessages([
-          ...messages,
-          {
-            ...initialResponse,
-            parentMessageId: message?.overrideParentMessageId ?? null,
-            messageId: message?.overrideParentMessageId + '_',
-          },
-        ]);
-      } else {
-        setMessages([
-          ...messages,
-          message,
-          {
-            ...initialResponse,
-            parentMessageId: message?.messageId,
-            messageId: message?.messageId + '_',
-          },
-        ]);
-      }
-
-      const { conversationId, parentMessageId } = message;
-
-      let update = {} as TConversation;
-      setConversation((prevState) => {
-        let title = prevState?.title;
-        if (parentMessageId !== Constants.NO_PARENT && title?.toLowerCase()?.includes('new chat')) {
-          const convos = queryClient.getQueryData<ConversationData>([QueryKeys.allConversations]);
-          const cachedConvo = getConversationById(convos, conversationId);
-          title = cachedConvo?.title;
-        }
-
-        update = tConvoUpdateSchema.parse({
-          ...prevState,
-          conversationId,
-          title,
-        }) as TConversation;
-
-        setStorage(update);
-        return update;
-      });
-
-      queryClient.setQueryData<ConversationData>([QueryKeys.allConversations], (convoData) => {
-        if (!convoData) {
-          return convoData;
-        }
-        if (parentMessageId === Constants.NO_PARENT) {
-          return addConversation(convoData, update);
-        } else {
-          return updateConversation(convoData, update);
-        }
-      });
-      resetLatestMessage();
-    },
-    [setMessages, setConversation, setStorage, queryClient, resetLatestMessage],
-  );
-
-  const finalHandler = useCallback(
-    (data: TResData, submission: TSubmission) => {
-      const { requestMessage, responseMessage, conversation, runMessages } = data;
-      const { messages, conversation: submissionConvo, isRegenerate = false } = submission;
-
-      setShowStopButton(false);
-      setCompleted((prev) => new Set(prev.add(submission?.initialResponse?.messageId)));
-
-      // update the messages; if assistants endpoint, client doesn't receive responseMessage
-      if (runMessages) {
-        setMessages([...runMessages]);
-      } else if (isRegenerate && responseMessage) {
-        setMessages([...messages, responseMessage]);
-      } else if (responseMessage) {
-        setMessages([...messages, requestMessage, responseMessage]);
-      }
-
-      const isNewConvo = conversation.conversationId !== submissionConvo.conversationId;
-      if (isNewConvo) {
-        queryClient.setQueryData<ConversationData>([QueryKeys.allConversations], (convoData) => {
-          if (!convoData) {
-            return convoData;
-          }
-          return deleteConversation(convoData, submissionConvo.conversationId as string);
-        });
-      }
-
-      // refresh title
-      if (isNewConvo && requestMessage && requestMessage.parentMessageId === Constants.NO_PARENT) {
-        setTimeout(() => {
-          genTitle.mutate({ conversationId: conversation.conversationId as string });
-        }, 2500);
-      }
-
-      setConversation((prevState) => {
-        const update = {
-          ...prevState,
-          ...conversation,
-        };
-
-        if (prevState?.model && prevState.model !== submissionConvo.model) {
-          update.model = prevState.model;
-        }
-
-        setStorage(update);
-        return update;
-      });
-
-      setIsSubmitting(false);
-    },
-    [
-      setMessages,
-      setConversation,
-      setStorage,
-      genTitle,
-      queryClient,
-      setIsSubmitting,
-      setShowStopButton,
-    ],
-  );
-
-  const errorHandler = useCallback(
-    ({ data, submission }: { data?: TResData; submission: TSubmission }) => {
-      const { messages, message, initialResponse } = submission;
-
-      setCompleted((prev) => new Set(prev.add(initialResponse.messageId)));
-
-      const conversationId = message?.conversationId ?? submission?.conversationId;
-
-      const parseErrorResponse = (data: TResData | Partial<TMessage>) => {
-        const metadata = data['responseMessage'] ?? data;
-        const errorMessage = {
-          ...initialResponse,
-          ...metadata,
-          error: true,
-          parentMessageId: message?.messageId,
-        };
-
-        if (!errorMessage.messageId) {
-          errorMessage.messageId = v4();
-        }
-
-        return tMessageSchema.parse(errorMessage);
-      };
-
-      if (!data) {
-        const convoId = conversationId ?? v4();
-        const errorResponse = parseErrorResponse({
-          text: 'Error connecting to server',
-          ...submission,
-          conversationId: convoId,
-        });
-        setMessages([...messages, message, errorResponse]);
-        newConversation({
-          template: { conversationId: convoId },
-          preset: tPresetSchema.parse(submission?.conversation),
-        });
-        setIsSubmitting(false);
-        return;
-      }
-
-      if (!conversationId && !data.conversationId) {
-        const convoId = v4();
-        const errorResponse = parseErrorResponse(data);
-        setMessages([...messages, message, errorResponse]);
-        newConversation({
-          template: { conversationId: convoId },
-          preset: tPresetSchema.parse(submission?.conversation),
-        });
-        setIsSubmitting(false);
-        return;
-      }
-
-      console.log('Error:', data);
-      const errorResponse = tMessageSchema.parse({
-        ...data,
-        error: true,
-        parentMessageId: message?.messageId,
-      });
-
-      setMessages([...messages, message, errorResponse]);
-      if (data.conversationId && paramId === 'new') {
-        newConversation({
-          template: { conversationId: data.conversationId },
-          preset: tPresetSchema.parse(submission?.conversation),
-        });
-      }
-
-      setIsSubmitting(false);
-      return;
-    },
-    [setMessages, paramId, setIsSubmitting, newConversation],
-  );
-
-  const abortConversation = useCallback(
-    async (conversationId = '', submission: TSubmission) => {
-      let runAbortKey = '';
-      try {
-        const conversation = (JSON.parse(localStorage.getItem('lastConversationSetup') ?? '') ??
-          {}) as TConversation;
-        const { conversationId, messages } = conversation;
-        runAbortKey = `${conversationId}:${messages?.[messages.length - 1]}`;
-      } catch (error) {
-        console.error('Error getting last conversation setup');
-        console.error(error);
-      }
-      const { endpoint: _endpoint, endpointType } = submission?.conversation || {};
-      const endpoint = endpointType ?? _endpoint;
-      try {
-        const response = await fetch(`${EndpointURLs[endpoint ?? '']}/abort`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${token}`,
-          },
-          body: JSON.stringify({
-            abortKey: _endpoint === EModelEndpoint.assistants ? runAbortKey : conversationId,
-            endpoint,
-          }),
-        });
-
-        // Check if the response is JSON
-        const contentType = response.headers.get('content-type');
-        if (contentType && contentType.includes('application/json')) {
-          const data = await response.json();
-          console.log('aborted', data);
-          if (response.status === 404) {
-            setIsSubmitting(false);
-            return;
-          }
-          if (data.final) {
-            finalHandler(data, submission);
-          } else {
-            cancelHandler(data, submission);
-          }
-        } else if (response.status === 204) {
-          const responseMessage = {
-            ...submission.initialResponse,
-          };
-
-          const data = {
-            requestMessage: submission.message,
-            responseMessage: responseMessage,
-            conversation: submission.conversation,
-          };
-          console.log('aborted', data);
-        } else {
-          throw new Error(
-            'Unexpected response from server; Status: ' +
-              response.status +
-              ' ' +
-              response.statusText,
-          );
-        }
-      } catch (error) {
-        console.error('Error cancelling request');
-        console.error(error);
-        const convoId = conversationId ?? v4();
-        const text =
-          submission.initialResponse?.text?.length > 45 ? submission.initialResponse?.text : '';
-        const errorMessage = {
-          ...submission,
-          ...submission.initialResponse,
-          text: text ?? (error as Error).message ?? 'Error cancelling request',
-          unfinished: !!text.length,
-          error: true,
-        };
-        const errorResponse = tMessageSchema.parse(errorMessage);
-        setMessages([...submission.messages, submission.message, errorResponse]);
-        newConversation({
-          template: { conversationId: convoId },
-          preset: tPresetSchema.parse(submission?.conversation),
-        });
-        setIsSubmitting(false);
-      }
-    },
-    [token, setIsSubmitting, finalHandler, cancelHandler, setMessages, newConversation],
-  );
+  const queryClient = useQueryClient();
+  const localize = useLocalize();
+  const { balanceEnabled = false } = config;
+  const balanceQuery = useGetUserBalance({ enabled: isAuthenticated && balanceEnabled });
+  const {
+    bindResponse,
+    contextHandler,
+    usageHandler,
+    tapStream,
+    tapContent,
+    finalizeUsage,
+    resetLive,
+    attributePending,
+  } = useUsageHandler();
 
   useEffect(() => {
-    if (submission === null) {
-      return;
-    }
-    if (Object.keys(submission).length === 0) {
+    if (submission == null || Object.keys(submission).length === 0) {
       return;
     }
 
-    let { message } = submission;
+    let currentSubmission = submission as EventSubmission;
+    /** Provider identity updates cross one boundary. Message rendering, usage,
+     * content, and terminal handlers all consume the same resolved response. */
+    const adoptResponse = (userMessage: Partial<TMessage>, responseMessage: Partial<TMessage>) => {
+      currentSubmission = {
+        ...currentSubmission,
+        userMessage: {
+          ...currentSubmission.userMessage,
+          ...userMessage,
+          overrideParentMessageId: currentSubmission.userMessage.overrideParentMessageId,
+        },
+        initialResponse: { ...currentSubmission.initialResponse, ...responseMessage },
+      };
+      bindResponse(currentSubmission);
+    };
 
     const payloadData = createPayload(submission);
     let { payload } = payloadData;
-    if (payload.endpoint === EModelEndpoint.assistants) {
-      payload = removeNullishValues(payload);
-    }
+    payload = removeNullishValues(payload) as TPayload;
 
-    let textIndex = null;
+    clearStepMaps();
+    bindResponse(currentSubmission);
 
-    const events = new SSE(payloadData.server, {
-      payload: JSON.stringify(payload),
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-    });
-
-    events.onmessage = (e: MessageEvent) => {
-      const data = JSON.parse(e.data);
-
-      if (data.final) {
-        const { plugins } = data;
-        finalHandler(data, { ...submission, plugins, message });
-        startupConfig?.checkBalance && balanceQuery.refetch();
-        console.log('final', data);
+    const handleFinal = (data: ChatFinalFrame) => {
+      /** A queued delta flush reading the older streaming copy must never
+       * land on top of the server-final write. */
+      cancelPendingDeltaFlush();
+      clearComposerDrafts(runIndex, submission.conversation?.conversationId, {
+        includeNewChatDraft: startedAsNewConversation(submission),
+      });
+      try {
+        finalHandler(data as TFinalResData, currentSubmission);
+        finalizeUsage(data, currentSubmission);
+      } catch (error) {
+        console.error('Error in finalHandler:', error);
+        setIsSubmitting(false);
+        setShowStopButton(false);
       }
-      if (data.created) {
-        message = {
-          ...message,
-          ...data.message,
-          overrideParentMessageId: message?.overrideParentMessageId,
-        };
-        createdHandler(data, { ...submission, message });
-      } else if (data.sync) {
-        /* synchronize messages to Assistants API as well as with real DB ID's */
-        syncHandler(data, { ...submission, message });
-      } else if (data.type) {
-        const { text, index } = data;
-        if (text && index !== textIndex) {
-          textIndex = index;
-        }
+      balanceEnabled && balanceQuery.refetch();
+      console.log('final', data);
+    };
 
-        contentHandler({ data, submission });
-      } else {
-        const text = data.text || data.response;
-        const { plugin, plugins } = data;
-
-        if (data.message) {
-          messageHandler(text, { ...submission, plugin, plugins, message });
+    const handlePendingAction = (pendingAction: Agents.PendingAction) => {
+      /** The pause card must attach to the same message state the stream
+       * produced, so apply any queued delta before reading the cache. */
+      flushPendingDeltas();
+      const pendingConversationId =
+        pendingAction.conversationId ?? submission.conversation?.conversationId;
+      if (pendingConversationId) {
+        jotaiStore.set(pendingApprovalActionFamily(pendingConversationId), pendingAction);
+      }
+      const messages = getMessages() ?? [];
+      const index = findPendingActionMessageIndex(messages, pendingAction);
+      if (index >= 0) {
+        const updated = applyPendingAction(messages[index], pendingAction);
+        if (updated !== messages[index]) {
+          const nextMessages = [...messages];
+          nextMessages[index] = updated;
+          setMessages(nextMessages);
         }
       }
     };
 
-    events.onopen = () => console.log('connection is opened');
-
-    events.oncancel = async () => {
-      const streamKey = submission?.initialResponse?.messageId;
+    const handleAbort = async () => {
+      /** FLUSH (not cancel): the abort below synthesizes the partial response
+       * from the cache, so the last queued tokens must land first. */
+      flushPendingDeltas();
+      const streamKey = (submission as TSubmission | null)?.['initialResponse']?.messageId;
       if (completed.has(streamKey)) {
         setIsSubmitting(false);
         setCompleted((prev) => {
@@ -574,42 +183,144 @@ export default function useSSE(submission: TSubmission | null, index = 0) {
       }
 
       setCompleted((prev) => new Set(prev.add(streamKey)));
-      return await abortConversation(
-        message?.conversationId ?? submission?.conversationId,
-        submission,
-      );
-    };
-
-    events.onerror = function (e: MessageEvent) {
-      console.log('error in server stream.');
-      startupConfig?.checkBalance && balanceQuery.refetch();
-      events.close();
-
-      let data: TResData | undefined = undefined;
+      const latestMessages = getMessages();
+      const conversationId = latestMessages?.[latestMessages.length - 1]?.conversationId;
+      /** Attribute usage billed before the stop to the partial response (the
+       *  branch tail), then reset pending, so it neither drops nor leaks into
+       *  the next response. Falls back to a plain reset when no response exists. */
+      const tail = latestMessages?.[latestMessages.length - 1];
+      const partialResponseId =
+        tail != null && tail.isCreatedByUser === false ? tail.messageId : null;
+      attributePending(partialResponseId, currentSubmission);
       try {
-        data = JSON.parse(e.data) as TResData;
+        await abortConversation(
+          conversationId ??
+            currentSubmission.userMessage.conversationId ??
+            submission.conversation?.conversationId ??
+            '',
+          currentSubmission,
+          latestMessages,
+        );
       } catch (error) {
-        console.error(error);
-        console.log(e);
+        console.error('Error during abort:', error);
         setIsSubmitting(false);
-        return;
+        setShowStopButton(false);
       }
-
-      errorHandler({ data, submission: { ...submission, message } });
     };
 
+    const handleError = (data: ChatErrorData | null | undefined) => {
+      console.log('error in server stream.');
+      const termsRefused = reopenTermsOnRefusal(queryClient, data);
+      balanceEnabled && balanceQuery.refetch();
+      resetLive(currentSubmission);
+      if (data === undefined) {
+        setIsSubmitting(false);
+      }
+
+      /** FLUSH (not cancel): the error card is built from the cache tail, so
+       * the last queued tokens must land before it is synthesized. */
+      flushPendingDeltas();
+      errorHandler({
+        data: termsRefused
+          ? ({ text: localize('com_error_terms_not_accepted') } as unknown as TResData)
+          : (data as TResData | undefined),
+        submission: currentSubmission,
+      });
+    };
+
+    const onEvent = (event: ChatEvent) => {
+      switch (event.type) {
+        case 'open':
+          setAbortScroll(false);
+          console.log('connection is opened');
+          return;
+        case 'final':
+          handleFinal(event.data);
+          return;
+        case 'created': {
+          const runId = v4();
+          setActiveRunId(runId);
+          const userMessage = { ...currentSubmission.userMessage, ...event.data.message };
+          adoptResponse(
+            userMessage,
+            buildCreatedInitialResponse({
+              ...currentSubmission,
+              userMessage,
+            }),
+          );
+          createdHandler(event.data, currentSubmission);
+          return;
+        }
+        case 'title':
+          titleHandler(event.data);
+          return;
+        case 'attachment':
+          attachmentHandler({ data: event.data as TAttachment, submission: currentSubmission });
+          return;
+        case 'context_usage':
+          contextHandler(event.data, currentSubmission);
+          return;
+        case 'token_usage':
+          usageHandler(event.data, currentSubmission);
+          return;
+        case 'pending_action':
+          handlePendingAction(event.data);
+          return;
+        case 'step':
+          if (
+            event.data.event === StepEvents.ON_MESSAGE_DELTA ||
+            event.data.event === StepEvents.ON_REASONING_DELTA
+          ) {
+            tapStream(event.data.data, currentSubmission);
+          }
+          stepHandler(event.data as TStepEvent, currentSubmission);
+          return;
+        case 'sync': {
+          const runId = v4();
+          setActiveRunId(runId);
+          /* synchronize messages to Assistants API as well as with real DB ID's */
+          adoptResponse(event.data.requestMessage ?? {}, event.data.responseMessage ?? {});
+          syncHandler(event.data as TSyncData, currentSubmission);
+          return;
+        }
+        case 'content': {
+          const text = 'text' in event.data ? event.data.text : undefined;
+          tapContent(text, currentSubmission);
+          contentHandler({ data: event.data, submission: currentSubmission });
+          return;
+        }
+        case 'text': {
+          const { data } = event;
+          const text = data.text ?? data.response;
+
+          adoptResponse({}, { parentMessageId: data.parentMessageId, messageId: data.messageId });
+
+          /** Legacy non-agent streams (handleText) send cumulative text here,
+           *  not via the content path; feed it to the live estimate too */
+          tapContent(text, currentSubmission);
+          messageHandler(text, currentSubmission);
+          return;
+        }
+        case 'error':
+          handleError(event.data);
+          return;
+        case 'abort':
+          void handleAbort();
+          return;
+        default:
+          /** Steering and label events belong to agent runs, which stream
+           * through `useResumableSSE`; this path never receives them. */
+          return;
+      }
+    };
+
+    const controller = new AbortController();
     setIsSubmitting(true);
-    events.stream();
+    transport
+      .stream({ token })
+      .send({ server: payloadData.server, payload }, { signal: controller.signal, onEvent });
 
-    return () => {
-      const isCancelled = events.readyState <= 1;
-      events.close();
-      // setSource(null);
-      if (isCancelled) {
-        const e = new Event('cancel');
-        events.dispatchEvent(e);
-      }
-    };
+    return () => controller.abort();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [submission]);
 }

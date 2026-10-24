@@ -1,296 +1,319 @@
+import { useRef, useState, useLayoutEffect } from 'react';
+import { motion } from 'framer-motion';
 import { useFormContext } from 'react-hook-form';
-import * as RadioGroup from '@radix-ui/react-radio-group';
-import * as DialogPrimitive from '@radix-ui/react-dialog';
+import { ChevronRight, KeyRound, ShieldCheck, ShieldOff } from 'lucide-react';
 import {
   AuthTypeEnum,
   AuthorizationTypeEnum,
   TokenExchangeMethodEnum,
 } from 'librechat-data-provider';
-import { DialogContent } from '~/components/ui/';
+import {
+  Input,
+  Radio,
+  Button,
+  OGDialog,
+  SecretInput,
+  OGDialogTitle,
+  OGDialogHeader,
+  OGDialogContent,
+  OGDialogTrigger,
+} from '@librechat/client';
+import type { LucideIcon } from 'lucide-react';
+import type { ReactNode } from 'react';
+import type { TranslationKeys } from '~/hooks';
+import { useLocalize } from '~/hooks';
 
-export default function ActionsAuth({
-  setOpenAuthDialog,
-}: {
-  setOpenAuthDialog: React.Dispatch<React.SetStateAction<boolean>>;
-}) {
+interface AuthMethod {
+  value: AuthTypeEnum;
+  icon: LucideIcon;
+  titleKey: TranslationKeys;
+  descKey: TranslationKeys;
+}
+
+const AUTH_METHODS: AuthMethod[] = [
+  {
+    value: AuthTypeEnum.None,
+    icon: ShieldOff,
+    titleKey: 'com_ui_none',
+    descKey: 'com_ui_auth_none_desc',
+  },
+  {
+    value: AuthTypeEnum.ServiceHttp,
+    icon: KeyRound,
+    titleKey: 'com_ui_api_key',
+    descKey: 'com_ui_auth_apikey_desc',
+  },
+  {
+    value: AuthTypeEnum.OAuth,
+    icon: ShieldCheck,
+    titleKey: 'com_ui_oauth',
+    descKey: 'com_ui_auth_oauth_desc',
+  },
+];
+
+export default function ActionsAuth({ disableOAuth }: { disableOAuth?: boolean }) {
+  const localize = useLocalize();
+  const [openAuthDialog, setOpenAuthDialog] = useState(false);
   const { watch, setValue, trigger } = useFormContext();
   const type = watch('type');
+  const current = AUTH_METHODS.find((method) => method.value === type) ?? AUTH_METHODS[0];
+  const authOptions = AUTH_METHODS.filter(
+    (method) => !(method.value === AuthTypeEnum.OAuth && disableOAuth === true),
+  ).map((method) => ({
+    value: method.value,
+    label: localize(method.titleKey),
+    icon: <method.icon className="size-4" aria-hidden={true} />,
+  }));
+
+  const handleSave = async () => {
+    const result = await trigger(undefined, { shouldFocus: true });
+    setValue('saved_auth_fields', result);
+    setOpenAuthDialog(!result);
+  };
+
   return (
-    <DialogContent
-      role="dialog"
-      id="radix-:rf5:"
-      aria-describedby="radix-:rf7:"
-      aria-labelledby="radix-:rf6:"
-      data-state="open"
-      className="left-1/2 col-auto col-start-2 row-auto row-start-2 w-full max-w-md -translate-x-1/2 rounded-xl bg-white pb-0 text-left shadow-xl transition-all dark:bg-gray-900 dark:text-gray-100"
-      tabIndex={-1}
-      style={{ pointerEvents: 'auto' }}
-    >
-      <div className="flex items-center justify-between border-b border-black/10 px-4 pb-4 pt-5 dark:border-white/10 sm:p-6">
-        <div className="flex">
-          <div className="flex items-center">
-            <div className="flex grow flex-col gap-1">
-              <h2
-                id="radix-:rf6:"
-                className="text-token-text-primary text-lg font-medium leading-6"
-              >
-                Authentication
-              </h2>
-            </div>
-          </div>
-        </div>
-      </div>
-      <div className="p-4 sm:p-6 sm:pt-0">
-        <div className="mb-4">
-          <label className="mb-1 block text-sm font-medium">Authentication Type</label>
-          <RadioGroup.Root
-            defaultValue={AuthTypeEnum.None}
-            onValueChange={(value) => setValue('type', value)}
-            value={type}
-            role="radiogroup"
-            aria-required="false"
-            dir="ltr"
-            className="flex gap-4"
-            tabIndex={0}
-            style={{ outline: 'none' }}
-          >
-            <div className="flex items-center gap-2">
-              <label htmlFor=":rf8:" className="flex cursor-pointer items-center gap-1">
-                <RadioGroup.Item
-                  type="button"
-                  role="radio"
-                  value={AuthTypeEnum.None}
-                  id=":rf8:"
-                  className="mr-1 flex h-5 w-5 items-center justify-center rounded-full border border-gray-500 bg-white dark:border-gray-600 dark:bg-gray-700"
-                  tabIndex={-1}
-                >
-                  <RadioGroup.Indicator className="h-2 w-2 rounded-full bg-gray-950 dark:bg-white"></RadioGroup.Indicator>
-                </RadioGroup.Item>
-                None
-              </label>
-            </div>
-            <div className="flex items-center gap-2">
-              <label htmlFor=":rfa:" className="flex cursor-pointer items-center gap-1">
-                <RadioGroup.Item
-                  type="button"
-                  role="radio"
-                  value={AuthTypeEnum.ServiceHttp}
-                  id=":rfa:"
-                  className="mr-1 flex h-5 w-5 items-center justify-center rounded-full border border-gray-500 bg-white dark:border-gray-600 dark:bg-gray-700"
-                  tabIndex={0}
-                >
-                  <RadioGroup.Indicator className="h-2 w-2 rounded-full bg-gray-950 dark:bg-white"></RadioGroup.Indicator>
-                </RadioGroup.Item>
-                API Key
-              </label>
-            </div>
-            <div className="flex items-center gap-2 text-gray-500">
-              <label htmlFor=":rfc:" className="flex cursor-not-allowed items-center gap-1">
-                <RadioGroup.Item
-                  type="button"
-                  role="radio"
-                  disabled={true}
-                  value={AuthTypeEnum.OAuth}
-                  id=":rfc:"
-                  className="mr-1 flex h-5 w-5 cursor-not-allowed items-center justify-center rounded-full border border-gray-500 bg-gray-300 dark:border-gray-600 dark:bg-gray-900"
-                  tabIndex={-1}
-                >
-                  <RadioGroup.Indicator className="h-2 w-2 rounded-full bg-gray-950 dark:bg-white"></RadioGroup.Indicator>
-                </RadioGroup.Item>
-                OAuth
-              </label>
-            </div>
-          </RadioGroup.Root>
-        </div>
-        {type === 'none' ? null : type === 'service_http' ? <ApiKey /> : <OAuth />}
-        {/* Cancel/Save */}
-        <div className="mt-5 flex flex-col gap-3 sm:mt-4 sm:flex-row-reverse">
+    <OGDialog open={openAuthDialog} onOpenChange={setOpenAuthDialog}>
+      <div className="mb-4">
+        <label className="text-text-primary mb-1.5 block font-medium">
+          {localize('com_ui_authentication')}
+        </label>
+        <OGDialogTrigger asChild>
           <button
-            className="btn relative bg-green-500 text-white hover:bg-green-600 dark:hover:bg-green-600"
-            onClick={async () => {
-              const result = await trigger(undefined, { shouldFocus: true });
-              setValue('saved_auth_fields', result);
-              setOpenAuthDialog(!result);
-            }}
+            type="button"
+            className="group border-border-light hover:bg-surface-secondary focus-visible:ring-text-primary rounded-theme-control flex w-full items-center gap-3 border bg-transparent px-3 py-2.5 text-start transition-colors focus:outline-hidden focus-visible:ring-2"
           >
-            <div className="flex w-full items-center justify-center gap-2">Save</div>
+            <current.icon className="text-text-secondary size-5 shrink-0" aria-hidden={true} />
+            <span className="min-w-0 flex-1">
+              <span className="text-text-primary block text-sm font-medium">
+                {localize(current.titleKey)}
+              </span>
+              <span className="text-text-secondary block truncate text-xs">
+                {localize(current.descKey)}
+              </span>
+            </span>
+            <ChevronRight
+              className="text-text-secondary size-4 shrink-0 rtl:-scale-x-100"
+              aria-hidden={true}
+            />
           </button>
-          <DialogPrimitive.Close className="btn btn-neutral relative">
-            <div className="flex w-full items-center justify-center gap-2">Cancel</div>
-          </DialogPrimitive.Close>
-        </div>
+        </OGDialogTrigger>
       </div>
-    </DialogContent>
+      <OGDialogContent className="text-text-primary w-full max-w-lg">
+        <OGDialogHeader>
+          <OGDialogTitle className="text-lg font-semibold">
+            {localize('com_ui_authentication')}
+          </OGDialogTitle>
+        </OGDialogHeader>
+        <div>
+          <span id="auth-method-label" className="sr-only">
+            {localize('com_ui_authentication_type')}
+          </span>
+          <Radio
+            options={authOptions}
+            value={type}
+            onChange={(value) => setValue('type', value)}
+            fullWidth
+            aria-labelledby="auth-method-label"
+          />
+          <AnimatedAuthFields type={type} />
+        </div>
+        <div className="flex justify-end">
+          <Button variant="default" onClick={handleSave}>
+            {localize('com_ui_done')}
+          </Button>
+        </div>
+      </OGDialogContent>
+    </OGDialog>
+  );
+}
+
+/**
+ * Animates the auth fields' height to their measured content height. Animating to
+ * a measured pixel value (instead of `height: 'auto'`) is what lets the
+ * ApiKey <-> OAuth swap tween between two different heights — `auto` never changes,
+ * so it would jump. The content swaps instantly; only the container height eases.
+ */
+function AnimatedAuthFields({ type }: { type: AuthTypeEnum }) {
+  const innerRef = useRef<HTMLDivElement>(null);
+  const [height, setHeight] = useState<number | 'auto'>(type === AuthTypeEnum.None ? 0 : 'auto');
+
+  useLayoutEffect(() => {
+    const el = innerRef.current;
+    if (!el) {
+      return;
+    }
+    const measure = () => setHeight(type === AuthTypeEnum.None ? 0 : el.scrollHeight);
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [type]);
+
+  let fields: ReactNode = null;
+  if (type === AuthTypeEnum.ServiceHttp) {
+    fields = <ApiKey />;
+  } else if (type === AuthTypeEnum.OAuth) {
+    fields = <OAuth />;
+  }
+
+  return (
+    <motion.div
+      initial={false}
+      animate={{ height, opacity: type === AuthTypeEnum.None ? 0 : 1 }}
+      transition={{ duration: 0.25, ease: [0.22, 1, 0.36, 1] }}
+      className="overflow-hidden"
+    >
+      <div ref={innerRef} className="space-y-4 pt-4">
+        {fields}
+      </div>
+    </motion.div>
+  );
+}
+
+function Field({
+  htmlFor,
+  label,
+  children,
+}: {
+  htmlFor: string;
+  label: string;
+  children: ReactNode;
+}) {
+  return (
+    <div className="space-y-1.5">
+      <label htmlFor={htmlFor} className="text-text-secondary block text-xs font-medium">
+        {label}
+      </label>
+      {children}
+    </div>
+  );
+}
+
+function SegmentedField({
+  id,
+  label,
+  value,
+  onValueChange,
+  options,
+}: {
+  id: string;
+  label: string;
+  value: string;
+  onValueChange: (value: string) => void;
+  options: Array<{ value: string; labelKey: TranslationKeys }>;
+}) {
+  const localize = useLocalize();
+  return (
+    <div className="space-y-1.5">
+      <label id={id} className="text-text-secondary block text-xs font-medium">
+        {label}
+      </label>
+      <Radio
+        options={options.map((option) => ({
+          value: option.value,
+          label: localize(option.labelKey),
+        }))}
+        value={value}
+        onChange={onValueChange}
+        fullWidth
+        aria-labelledby={id}
+      />
+    </div>
   );
 }
 
 const ApiKey = () => {
+  const localize = useLocalize();
   const { register, watch, setValue } = useFormContext();
   const authorization_type = watch('authorization_type');
   const type = watch('type');
   return (
     <>
-      <label className="mb-1 block text-sm font-medium">API Key</label>
-      <input
-        placeholder="<HIDDEN>"
-        type="password"
-        autoComplete="off"
-        className="border-token-border-medium mb-2 h-9 w-full resize-none overflow-y-auto rounded-lg border px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-blue-400 dark:bg-gray-800"
-        {...register('api_key', { required: type === AuthTypeEnum.ServiceHttp })}
-      />
-      <label className="mb-1 block text-sm font-medium">Auth Type</label>
-      <RadioGroup.Root
-        defaultValue={AuthorizationTypeEnum.Basic}
-        onValueChange={(value) => setValue('authorization_type', value)}
+      <Field htmlFor="auth-api-key" label={localize('com_ui_api_key')}>
+        <SecretInput
+          id="auth-api-key"
+          autoComplete="new-password"
+          controlsOnHover
+          placeholder="<HIDDEN>"
+          {...register('api_key', { required: type === AuthTypeEnum.ServiceHttp })}
+        />
+      </Field>
+      <SegmentedField
+        id="auth-type-label"
+        label={localize('com_ui_auth_type')}
         value={authorization_type}
-        role="radiogroup"
-        aria-required="true"
-        dir="ltr"
-        className="mb-2 flex gap-6 overflow-hidden rounded-lg"
-        tabIndex={0}
-        style={{ outline: 'none' }}
-      >
-        <div className="flex items-center gap-2">
-          <label htmlFor=":rfu:" className="flex cursor-pointer items-center gap-1">
-            <RadioGroup.Item
-              type="button"
-              role="radio"
-              value={AuthorizationTypeEnum.Basic}
-              id=":rfu:"
-              className="mr-1 flex h-5 w-5 items-center justify-center rounded-full border border-gray-500 bg-white dark:border-gray-600 dark:bg-gray-700"
-              tabIndex={-1}
-            >
-              <RadioGroup.Indicator className="h-2 w-2 rounded-full bg-gray-950 dark:bg-white"></RadioGroup.Indicator>
-            </RadioGroup.Item>
-            Basic
-          </label>
-        </div>
-        <div className="flex items-center gap-2">
-          <label htmlFor=":rg0:" className="flex cursor-pointer items-center gap-1">
-            <RadioGroup.Item
-              type="button"
-              role="radio"
-              value={AuthorizationTypeEnum.Bearer}
-              id=":rg0:"
-              className="mr-1 flex h-5 w-5 items-center justify-center rounded-full border border-gray-500 bg-white dark:border-gray-600 dark:bg-gray-700"
-              tabIndex={-1}
-            >
-              <RadioGroup.Indicator className="h-2 w-2 rounded-full bg-gray-950 dark:bg-white"></RadioGroup.Indicator>
-            </RadioGroup.Item>
-            Bearer
-          </label>
-        </div>
-        <div className="flex items-center gap-2">
-          <label htmlFor=":rg2:" className="flex cursor-pointer items-center gap-1">
-            <RadioGroup.Item
-              type="button"
-              role="radio"
-              value={AuthorizationTypeEnum.Custom}
-              id=":rg2:"
-              className="mr-1 flex h-5 w-5 items-center justify-center rounded-full border border-gray-500 bg-white dark:border-gray-600 dark:bg-gray-700"
-              tabIndex={0}
-            >
-              <RadioGroup.Indicator className="h-2 w-2 rounded-full bg-gray-950 dark:bg-white"></RadioGroup.Indicator>
-            </RadioGroup.Item>
-            Custom
-          </label>
-        </div>
-      </RadioGroup.Root>
+        onValueChange={(value) => setValue('authorization_type', value)}
+        options={[
+          { value: AuthorizationTypeEnum.Basic, labelKey: 'com_ui_basic' },
+          { value: AuthorizationTypeEnum.Bearer, labelKey: 'com_ui_bearer' },
+          { value: AuthorizationTypeEnum.Custom, labelKey: 'com_ui_custom' },
+        ]}
+      />
       {authorization_type === AuthorizationTypeEnum.Custom && (
-        <div className="mt-2">
-          <label className="mb-1 block text-sm font-medium">Custom Header Name</label>
-          <input
-            className="border-token-border-medium mb-2 h-9 w-full resize-none overflow-y-auto rounded-lg border px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-blue-400 dark:bg-gray-800"
+        <Field htmlFor="auth-custom-header" label={localize('com_ui_custom_header_name')}>
+          <Input
+            id="auth-custom-header"
             placeholder="X-Api-Key"
             {...register('custom_auth_header', {
               required: authorization_type === AuthorizationTypeEnum.Custom,
             })}
           />
-        </div>
+        </Field>
       )}
     </>
   );
 };
 
 const OAuth = () => {
+  const localize = useLocalize();
   const { register, watch, setValue } = useFormContext();
   const token_exchange_method = watch('token_exchange_method');
   const type = watch('type');
   return (
     <>
-      <label className="mb-1 block text-sm font-medium">Client ID</label>
-      <input
-        placeholder="<HIDDEN>"
-        type="password"
-        autoComplete="off"
-        className="border-token-border-medium mb-2 h-9 w-full resize-none overflow-y-auto rounded-lg border px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-blue-400 dark:bg-gray-800"
-        {...register('oauth_client_id', { required: type === AuthTypeEnum.OAuth })}
-      />
-      <label className="mb-1 block text-sm font-medium">Client Secret</label>
-      <input
-        placeholder="<HIDDEN>"
-        type="password"
-        autoComplete="off"
-        className="border-token-border-medium mb-2 h-9 w-full resize-none overflow-y-auto rounded-lg border px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-blue-400 dark:bg-gray-800"
-        {...register('oauth_client_secret', { required: type === AuthTypeEnum.OAuth })}
-      />
-      <label className="mb-1 block text-sm font-medium">Authorization URL</label>
-      <input
-        className="border-token-border-medium mb-2 h-9 w-full resize-none overflow-y-auto rounded-lg border px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-blue-400 dark:bg-gray-800"
-        {...register('authorization_url', { required: type === AuthTypeEnum.OAuth })}
-      />
-      <label className="mb-1 block text-sm font-medium">Token URL</label>
-      <input
-        className="border-token-border-medium mb-2 h-9 w-full resize-none overflow-y-auto rounded-lg border px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-blue-400 dark:bg-gray-800"
-        {...register('client_url', { required: type === AuthTypeEnum.OAuth })}
-      />
-      <label className="mb-1 block text-sm font-medium">Scope</label>
-      <input
-        className="border-token-border-medium mb-2 h-9 w-full resize-none overflow-y-auto rounded-lg border px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-blue-400 dark:bg-gray-800"
-        {...register('scope', { required: type === AuthTypeEnum.OAuth })}
-      />
-      <label className="mb-1 block text-sm font-medium">Token Exchange Method</label>
-      <RadioGroup.Root
-        defaultValue={AuthorizationTypeEnum.Basic}
-        onValueChange={(value) => setValue('token_exchange_method', value)}
+      <Field htmlFor="auth-client-id" label={localize('com_ui_client_id')}>
+        <SecretInput
+          id="auth-client-id"
+          autoComplete="new-password"
+          controlsOnHover
+          placeholder="<HIDDEN>"
+          {...register('oauth_client_id', { required: false })}
+        />
+      </Field>
+      <Field htmlFor="auth-client-secret" label={localize('com_ui_client_secret')}>
+        <SecretInput
+          id="auth-client-secret"
+          autoComplete="new-password"
+          controlsOnHover
+          placeholder="<HIDDEN>"
+          {...register('oauth_client_secret', { required: false })}
+        />
+      </Field>
+      <Field htmlFor="auth-authorization-url" label={localize('com_ui_auth_url')}>
+        <Input
+          id="auth-authorization-url"
+          {...register('authorization_url', { required: type === AuthTypeEnum.OAuth })}
+        />
+      </Field>
+      <Field htmlFor="auth-token-url" label={localize('com_ui_token_url')}>
+        <Input
+          id="auth-token-url"
+          {...register('client_url', { required: type === AuthTypeEnum.OAuth })}
+        />
+      </Field>
+      <Field htmlFor="auth-scope" label={localize('com_ui_scope')}>
+        <Input id="auth-scope" {...register('scope', { required: type === AuthTypeEnum.OAuth })} />
+      </Field>
+      <SegmentedField
+        id="auth-token-exchange-label"
+        label={localize('com_ui_token_exchange_method')}
         value={token_exchange_method}
-        role="radiogroup"
-        aria-required="true"
-        dir="ltr"
-        tabIndex={0}
-        style={{ outline: 'none' }}
-      >
-        <div className="flex items-center gap-2">
-          <label htmlFor=":rj1:" className="flex cursor-pointer items-center gap-1">
-            <RadioGroup.Item
-              type="button"
-              role="radio"
-              value={TokenExchangeMethodEnum.DefaultPost}
-              id=":rj1:"
-              className="mr-1 flex h-5 w-5 items-center justify-center rounded-full border border-gray-500 bg-white dark:border-gray-600 dark:bg-gray-700"
-              tabIndex={-1}
-            >
-              <RadioGroup.Indicator className="h-2 w-2 rounded-full bg-gray-950 dark:bg-white"></RadioGroup.Indicator>
-            </RadioGroup.Item>
-            Default (POST request)
-          </label>
-        </div>
-        <div className="flex items-center gap-2">
-          <label htmlFor=":rj3:" className="flex cursor-pointer items-center gap-1">
-            <RadioGroup.Item
-              type="button"
-              role="radio"
-              value={TokenExchangeMethodEnum.BasicAuthHeader}
-              id=":rj3:"
-              className="mr-1 flex h-5 w-5 items-center justify-center rounded-full border border-gray-500 bg-white dark:border-gray-600 dark:bg-gray-700"
-              tabIndex={-1}
-            >
-              <RadioGroup.Indicator className="h-2 w-2 rounded-full bg-gray-950 dark:bg-white"></RadioGroup.Indicator>
-            </RadioGroup.Item>
-            Basic authorization header
-          </label>
-        </div>
-      </RadioGroup.Root>
+        onValueChange={(value) => setValue('token_exchange_method', value)}
+        options={[
+          { value: TokenExchangeMethodEnum.DefaultPost, labelKey: 'com_ui_default_post_request' },
+          { value: TokenExchangeMethodEnum.BasicAuthHeader, labelKey: 'com_ui_basic_auth_header' },
+        ]}
+      />
     </>
   );
 };

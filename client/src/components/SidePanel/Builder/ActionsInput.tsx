@@ -1,23 +1,26 @@
-import debounce from 'lodash/debounce';
 import { useState, useEffect } from 'react';
+import debounce from 'lodash/debounce';
 import { useFormContext } from 'react-hook-form';
+import { Spinner, useToastContext } from '@librechat/client';
 import {
   validateAndParseOpenAPISpec,
   openapiToFunction,
   AuthTypeEnum,
 } from 'librechat-data-provider';
 import type {
-  ValidationResult,
   Action,
   FunctionTool,
   ActionMetadata,
+  ValidationResult,
+  AssistantsEndpoint,
 } from 'librechat-data-provider';
-import type { ActionAuthForm } from '~/common';
+import type { ActionAuthForm, ActionWithNullableMetadata } from '~/common';
 import type { Spec } from './ActionsTable';
+import ActionCallback from '~/components/SidePanel/Builder/ActionCallback';
 import { ActionsTable, columns } from './ActionsTable';
+import { useAssistantsMapContext } from '~/Providers';
 import { useUpdateAction } from '~/data-provider';
-import { cn, removeFocusOutlines } from '~/utils';
-import { Spinner } from '~/components/svg';
+import { useLocalize } from '~/hooks';
 
 const debouncedValidation = debounce(
   (input: string, callback: (result: ValidationResult) => void) => {
@@ -30,10 +33,14 @@ const debouncedValidation = debounce(
 export default function ActionsInput({
   action,
   assistant_id,
+  endpoint,
+  version,
   setAction,
 }: {
-  action?: Action;
+  action?: ActionWithNullableMetadata;
   assistant_id?: string;
+  endpoint: AssistantsEndpoint;
+  version: number | string;
   setAction: React.Dispatch<React.SetStateAction<Action | undefined>>;
 }) {
   const handleResult = (result: ValidationResult) => {
@@ -44,6 +51,9 @@ export default function ActionsInput({
     setValidationResult(result);
   };
 
+  const localize = useLocalize();
+  const { showToast } = useToastContext();
+  const assistantMap = useAssistantsMapContext();
   const { handleSubmit, reset } = useFormContext<ActionAuthForm>();
   const [validationResult, setValidationResult] = useState<null | ValidationResult>(null);
   const [inputValue, setInputValue] = useState('');
@@ -52,11 +62,12 @@ export default function ActionsInput({
   const [functions, setFunctions] = useState<FunctionTool[] | null>(null);
 
   useEffect(() => {
-    if (!action?.metadata?.raw_spec) {
+    const rawSpec = action?.metadata?.raw_spec ?? '';
+    if (!rawSpec) {
       return;
     }
-    setInputValue(action.metadata.raw_spec);
-    debouncedValidation(action.metadata.raw_spec, handleResult);
+    setInputValue(rawSpec);
+    debouncedValidation(rawSpec, handleResult);
   }, [action?.metadata?.raw_spec]);
 
   useEffect(() => {
@@ -81,14 +92,25 @@ export default function ActionsInput({
 
   const updateAction = useUpdateAction({
     onSuccess(data) {
+      showToast({
+        message: localize('com_assistants_update_actions_success'),
+        status: 'success',
+      });
       reset();
       setAction(data[2]);
+    },
+    onError(error) {
+      showToast({
+        message:
+          (error as Error | undefined)?.message ?? localize('com_assistants_update_actions_error'),
+        status: 'error',
+      });
     },
   });
 
   const saveAction = handleSubmit((authFormData) => {
-    console.log('authFormData', authFormData);
-    if (!assistant_id) {
+    const currentAssistantId = assistant_id ?? '';
+    if (!currentAssistantId) {
       // alert user?
       return;
     }
@@ -101,16 +123,19 @@ export default function ActionsInput({
       return;
     }
 
-    let { metadata = {} } = action ?? {};
+    let { metadata } = action ?? {};
+    if (!metadata) {
+      metadata = {};
+    }
     const action_id = action?.action_id;
     metadata.raw_spec = inputValue;
     const parsedUrl = new URL(data[0].domain);
-    const domain = parsedUrl.hostname;
-    if (!domain) {
+    if (!parsedUrl.hostname) {
       // alert user?
       return;
     }
-    metadata.domain = domain;
+    // Send protocol + hostname for proper SSRF validation (e.g., "http://192.168.1.1")
+    metadata.domain = `${parsedUrl.protocol}//${parsedUrl.hostname}`;
 
     const { type, saved_auth_fields } = authFormData;
 
@@ -157,7 +182,10 @@ export default function ActionsInput({
       action_id,
       metadata,
       functions,
-      assistant_id,
+      assistant_id: currentAssistantId,
+      endpoint,
+      version,
+      model: assistantMap?.[endpoint][currentAssistantId].model ?? '',
     });
   });
 
@@ -172,42 +200,55 @@ export default function ActionsInput({
     debouncedValidation(newValue, handleResult);
   };
 
+  const submitContext = () => {
+    if (updateAction.isLoading) {
+      return <Spinner className="icon-md" />;
+    } else if (action?.action_id.length ?? 0) {
+      return localize('com_ui_update');
+    } else {
+      return localize('com_ui_create');
+    }
+  };
+
   return (
     <>
       <div className="">
         <div className="mb-1 flex flex-wrap items-center justify-between gap-4">
-          <label className="text-token-text-primary whitespace-nowrap font-medium">Schema</label>
+          <label
+            htmlFor="example-schema"
+            className="text-text-primary font-medium whitespace-nowrap"
+          >
+            {localize('com_ui_schema')}
+          </label>
+          {/* TODO: Implement examples functionality
           <div className="flex items-center gap-2">
-            {/* <button className="btn btn-neutral border-token-border-light relative h-8 min-w-[100px] rounded-lg font-medium">
-              <div className="flex w-full items-center justify-center text-xs">Import from URL</div>
-            </button> */}
             <select
+              id="example-schema"
               onChange={(e) => console.log(e.target.value)}
-              className="border-token-border-medium h-8 min-w-[100px] rounded-lg border bg-transparent px-2 py-0 text-sm"
+              className="border-border-medium h-8 min-w-[6.25rem] rounded-lg border bg-transparent px-2 py-0 text-sm"
             >
-              <option value="label">Examples</option>
+              <option value="label">{localize('com_ui_examples')}</option>
               <option value="0">Weather (JSON)</option>
               <option value="1">Pet Store (YAML)</option>
               <option value="2">Blank Template</option>
             </select>
           </div>
+          */}
         </div>
-        <div className="border-token-border-light mb-4 overflow-hidden rounded-lg border">
+        <div className="border-border-medium bg-surface-primary hover:border-border-heavy mb-4 w-full overflow-hidden rounded-lg border ring-0">
           <div className="relative">
             <textarea
+              id="schemaInput"
               value={inputValue}
               onChange={handleInputChange}
               spellCheck="false"
-              placeholder="Enter your OpenAPI schema here"
-              className={cn(
-                'text-token-text-primary block h-96 w-full border-none bg-transparent p-2 font-mono text-xs',
-                removeFocusOutlines,
-              )}
+              placeholder={localize('com_ui_enter_openapi_schema')}
+              className="text-text-primary focus:ring-border-light block h-96 w-full bg-transparent p-2 font-mono text-xs outline-hidden focus:ring-1"
             />
             {/* TODO: format input button */}
           </div>
           {validationResult && validationResult.message !== 'OpenAPI spec is valid.' && (
-            <div className="border-token-border-light border-t p-2 text-red-500">
+            <div className="border-border-light text-text-destructive border-t p-2">
               {validationResult.message.split('\n').map((line: string, i: number) => (
                 <div key={i}>{line}</div>
               ))}
@@ -216,50 +257,38 @@ export default function ActionsInput({
         </div>
       </div>
       {!!data && (
-        <div>
-          <div className="mb-1.5 flex items-center">
-            <label className="text-token-text-primary block font-medium">Available actions</label>
+        <div className="my-2">
+          <div className="flex items-center">
+            <label className="text-text-primary block font-medium">
+              {localize('com_assistants_available_actions')}
+            </label>
           </div>
           <ActionsTable columns={columns} data={data} />
         </div>
       )}
-      <div className="mt-4">
+      <div className="relative my-1">
+        <ActionCallback action_id={action?.action_id} />
         <div className="mb-1.5 flex items-center">
-          <span className="" data-state="closed">
-            <label className="text-token-text-primary block font-medium">Privacy policy</label>
-          </span>
+          <label className="text-text-primary block font-medium">
+            {localize('com_ui_privacy_policy_url')}
+          </label>
         </div>
-        <div className="rounded-md border border-gray-300 px-3 py-2 shadow-none focus-within:border-gray-800 focus-within:ring-1 focus-within:ring-gray-800 dark:bg-gray-700 dark:focus-within:border-white dark:focus-within:ring-white">
-          <label
-            htmlFor="privacyPolicyUrl"
-            className="block text-xs font-medium text-gray-900 dark:text-gray-100"
+        <div className="border-border-medium bg-surface-primary hover:border-border-heavy flex h-9 w-full rounded-lg border">
+          <input
+            type="text"
+            placeholder="https://api.example-weather-app.com/privacy"
+            className="placeholder:text-text-secondary-alt focus:ring-border-light flex-1 rounded-lg bg-transparent px-3 py-1.5 text-sm outline-hidden focus:ring-1"
           />
-          <div className="relative">
-            <input
-              name="privacyPolicyUrl"
-              id="privacyPolicyUrl"
-              className="block w-full border-0 p-0 text-gray-900 placeholder-gray-500 shadow-none outline-none focus-within:shadow-none focus-within:outline-none focus-within:ring-0 focus:border-none focus:ring-0 dark:bg-gray-700 dark:text-gray-100 sm:text-sm"
-              placeholder="https://api.example-weather-app.com/privacy"
-              // value=""
-            />
-          </div>
         </div>
       </div>
       <div className="flex items-center justify-end">
         <button
           disabled={!functions || !functions.length}
           onClick={saveAction}
-          className="focus:shadow-outline mt-1 flex min-w-[100px] items-center justify-center rounded bg-green-500 px-4 py-2 font-semibold text-white hover:bg-green-400 focus:border-green-500 focus:outline-none focus:ring-0 disabled:bg-green-400"
+          className="bg-surface-submit text-text-on-status hover:bg-surface-submit-hover focus-visible:ring-text-primary focus-visible:ring-offset-surface-primary mt-1 flex min-w-[6.25rem] items-center justify-center rounded px-4 py-2 font-semibold focus:outline-hidden focus-visible:ring-2 focus-visible:ring-offset-2 disabled:opacity-50"
           type="button"
         >
-          {/* TODO: Add localization */}
-          {updateAction.isLoading ? (
-            <Spinner className="icon-md" />
-          ) : action?.action_id ? (
-            'Update'
-          ) : (
-            'Create'
-          )}
+          {submitContext()}
         </button>
       </div>
     </>

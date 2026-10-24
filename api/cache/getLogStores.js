@@ -1,64 +1,213 @@
-const Keyv = require('keyv');
-const { CacheKeys, ViolationTypes } = require('librechat-data-provider');
-const { logFile, violationFile } = require('./keyvFiles');
-const { math, isEnabled } = require('~/server/utils');
-const keyvRedis = require('./keyvRedis');
-const keyvMongo = require('./keyvMongo');
+const { Keyv } = require('keyv');
+const { logger } = require('@librechat/data-schemas');
+const { Time, CacheKeys, ViolationTypes } = require('librechat-data-provider');
+const {
+  logFile,
+  keyvMongo,
+  cacheConfig,
+  sessionCache,
+  standardCache,
+  violationCache,
+  userPrincipalsCache,
+  registerShutdownTask,
+  auditCacheStores,
+  formatMemoryUsage,
+} = require('@librechat/api');
 
-const { BAN_DURATION, USE_REDIS } = process.env ?? {};
-
-const duration = math(BAN_DURATION, 7200000);
-
-const createViolationInstance = (namespace) => {
-  const config = isEnabled(USE_REDIS) ? { store: keyvRedis } : { store: violationFile, namespace };
-  return new Keyv(config);
+/** No-op store for cache namespaces that are deliberately disabled. */
+const disabledCache = {
+  get: async () => undefined,
+  set: async () => undefined,
+  delete: async () => undefined,
+  clear: async () => undefined,
 };
-
-// Serve cache from memory so no need to clear it on startup/exit
-const pending_req = isEnabled(USE_REDIS)
-  ? new Keyv({ store: keyvRedis })
-  : new Keyv({ namespace: 'pending_req' });
-
-const config = isEnabled(USE_REDIS)
-  ? new Keyv({ store: keyvRedis })
-  : new Keyv({ namespace: CacheKeys.CONFIG_STORE });
-
-const tokenConfig = isEnabled(USE_REDIS) // ttl: 30 minutes
-  ? new Keyv({ store: keyvRedis, ttl: 1800000 })
-  : new Keyv({ namespace: CacheKeys.TOKEN_CONFIG, ttl: 1800000 });
-
-const genTitle = isEnabled(USE_REDIS) // ttl: 2 minutes
-  ? new Keyv({ store: keyvRedis, ttl: 120000 })
-  : new Keyv({ namespace: CacheKeys.GEN_TITLE, ttl: 120000 });
-
-const modelQueries = isEnabled(process.env.USE_REDIS)
-  ? new Keyv({ store: keyvRedis })
-  : new Keyv({ namespace: CacheKeys.MODEL_QUERIES });
-
-const abortKeys = isEnabled(USE_REDIS)
-  ? new Keyv({ store: keyvRedis })
-  : new Keyv({ namespace: CacheKeys.ABORT_KEYS });
 
 const namespaces = {
-  [CacheKeys.CONFIG_STORE]: config,
-  pending_req,
-  ban: new Keyv({ store: keyvMongo, namespace: 'bans', ttl: duration }),
-  general: new Keyv({ store: logFile, namespace: 'violations' }),
-  concurrent: createViolationInstance('concurrent'),
-  non_browser: createViolationInstance('non_browser'),
-  message_limit: createViolationInstance('message_limit'),
-  token_balance: createViolationInstance(ViolationTypes.TOKEN_BALANCE),
-  registrations: createViolationInstance('registrations'),
-  [ViolationTypes.FILE_UPLOAD_LIMIT]: createViolationInstance(ViolationTypes.FILE_UPLOAD_LIMIT),
-  [ViolationTypes.ILLEGAL_MODEL_REQUEST]: createViolationInstance(
-    ViolationTypes.ILLEGAL_MODEL_REQUEST,
+  [ViolationTypes.GENERAL]: new Keyv({ store: logFile, namespace: 'violations' }),
+  [ViolationTypes.LOGINS]: violationCache(ViolationTypes.LOGINS),
+  [ViolationTypes.CONCURRENT]: violationCache(ViolationTypes.CONCURRENT),
+  [ViolationTypes.NON_BROWSER]: violationCache(ViolationTypes.NON_BROWSER),
+  [ViolationTypes.MESSAGE_LIMIT]: violationCache(ViolationTypes.MESSAGE_LIMIT),
+  [ViolationTypes.REGISTRATIONS]: violationCache(ViolationTypes.REGISTRATIONS),
+  [ViolationTypes.TOKEN_BALANCE]: violationCache(ViolationTypes.TOKEN_BALANCE),
+  [ViolationTypes.TTS_LIMIT]: violationCache(ViolationTypes.TTS_LIMIT),
+  [ViolationTypes.STT_LIMIT]: violationCache(ViolationTypes.STT_LIMIT),
+  [ViolationTypes.CONVO_ACCESS]: violationCache(ViolationTypes.CONVO_ACCESS),
+  [ViolationTypes.SHARE_LIMIT]: violationCache(ViolationTypes.SHARE_LIMIT),
+  [ViolationTypes.TOOL_CALL_LIMIT]: violationCache(ViolationTypes.TOOL_CALL_LIMIT),
+  [ViolationTypes.FILE_UPLOAD_LIMIT]: violationCache(ViolationTypes.FILE_UPLOAD_LIMIT),
+  [ViolationTypes.VERIFY_EMAIL_LIMIT]: violationCache(ViolationTypes.VERIFY_EMAIL_LIMIT),
+  [ViolationTypes.RESET_PASSWORD_LIMIT]: violationCache(ViolationTypes.RESET_PASSWORD_LIMIT),
+  [ViolationTypes.ILLEGAL_MODEL_REQUEST]: violationCache(ViolationTypes.ILLEGAL_MODEL_REQUEST),
+  [ViolationTypes.BAN]: new Keyv({
+    store: keyvMongo,
+    namespace: CacheKeys.BANS,
+    ttl: cacheConfig.BAN_DURATION,
+  }),
+
+  [CacheKeys.OPENID_SESSION]: sessionCache(CacheKeys.OPENID_SESSION),
+  [CacheKeys.SAML_SESSION]: sessionCache(CacheKeys.SAML_SESSION),
+
+  [CacheKeys.ROLES]: standardCache(CacheKeys.ROLES),
+  [CacheKeys.USER_PRINCIPALS]: userPrincipalsCache() ?? disabledCache,
+  /** Authorization IDs stay uncached because a failed shared invalidation cannot fail closed. */
+  [CacheKeys.PROMPT_GROUPS_ACCESS]: disabledCache,
+  [CacheKeys.APP_CONFIG]: standardCache(CacheKeys.APP_CONFIG),
+  [CacheKeys.CONFIG_STORE]: standardCache(CacheKeys.CONFIG_STORE),
+  [CacheKeys.TOOL_CACHE]: standardCache(CacheKeys.TOOL_CACHE),
+  [CacheKeys.PENDING_REQ]: standardCache(CacheKeys.PENDING_REQ),
+  [CacheKeys.ENCODED_DOMAINS]: new Keyv({ store: keyvMongo, namespace: CacheKeys.ENCODED_DOMAINS }),
+  [CacheKeys.ABORT_KEYS]: standardCache(CacheKeys.ABORT_KEYS, Time.TEN_MINUTES),
+  [CacheKeys.TOKEN_CONFIG]: standardCache(CacheKeys.TOKEN_CONFIG, Time.THIRTY_MINUTES),
+  [CacheKeys.GEN_TITLE]: standardCache(CacheKeys.GEN_TITLE, Time.TWO_MINUTES),
+  [CacheKeys.S3_EXPIRY_INTERVAL]: standardCache(CacheKeys.S3_EXPIRY_INTERVAL, Time.THIRTY_MINUTES),
+  [CacheKeys.MODEL_QUERIES]: standardCache(CacheKeys.MODEL_QUERIES),
+  [CacheKeys.AUDIO_RUNS]: standardCache(CacheKeys.AUDIO_RUNS, Time.TEN_MINUTES),
+  [CacheKeys.MESSAGES]: standardCache(CacheKeys.MESSAGES, Time.ONE_MINUTE),
+  [CacheKeys.FLOWS]: standardCache(CacheKeys.FLOWS, Time.ONE_MINUTE * 10),
+  [CacheKeys.OPENID_EXCHANGED_TOKENS]: standardCache(
+    CacheKeys.OPENID_EXCHANGED_TOKENS,
+    Time.TEN_MINUTES,
   ),
-  logins: createViolationInstance('logins'),
-  [CacheKeys.ABORT_KEYS]: abortKeys,
-  [CacheKeys.TOKEN_CONFIG]: tokenConfig,
-  [CacheKeys.GEN_TITLE]: genTitle,
-  [CacheKeys.MODEL_QUERIES]: modelQueries,
+  [CacheKeys.AUTH_USER_DOC]: standardCache(CacheKeys.AUTH_USER_DOC, undefined, undefined, {
+    throwOnErrors: true,
+  }),
+  [CacheKeys.ADMIN_OAUTH_EXCHANGE]: standardCache(
+    CacheKeys.ADMIN_OAUTH_EXCHANGE,
+    Time.THIRTY_SECONDS,
+  ),
+  [CacheKeys.PASSKEY_CHALLENGE]: standardCache(CacheKeys.PASSKEY_CHALLENGE, Time.FIVE_MINUTES),
+  [CacheKeys.AGENT_LINKED_INSTRUCTIONS]: standardCache(
+    CacheKeys.AGENT_LINKED_INSTRUCTIONS,
+    Time.FIVE_MINUTES,
+  ),
 };
+
+/**
+ * Gets all cache stores that have TTL configured
+ * @returns {Keyv[]}
+ */
+function getTTLStores() {
+  return Object.values(namespaces).filter(
+    (store) =>
+      store instanceof Keyv &&
+      parseInt(store.opts?.ttl ?? '0') > 0 &&
+      !store.opts?.store?.constructor?.name?.includes('Redis'), // Only include non-Redis stores
+  );
+}
+
+/**
+ * Clears entries older than the cache's TTL
+ * @param {Keyv} cache
+ */
+async function clearExpiredFromCache(cache) {
+  if (!cache?.opts?.store?.entries) {
+    return;
+  }
+
+  const ttl = cache.opts.ttl;
+  if (!ttl) {
+    return;
+  }
+
+  const expiryTime = Date.now() - ttl;
+  let cleared = 0;
+
+  // Get all keys first to avoid modification during iteration
+  const keys = Array.from(cache.opts.store.keys());
+
+  for (const key of keys) {
+    try {
+      const raw = cache.opts.store.get(key);
+      if (!raw) {
+        continue;
+      }
+
+      const data = cache.opts.deserialize(raw);
+      // Check if the entry is older than TTL
+      if (data?.expires && data.expires <= expiryTime) {
+        const deleted = await cache.opts.store.delete(key);
+        if (!deleted) {
+          cacheConfig.DEBUG_MEMORY_CACHE &&
+            logger.warn(`[Cache] Error deleting entry from ${cache.opts.namespace}`);
+          continue;
+        }
+        cleared++;
+      }
+    } catch (error) {
+      cacheConfig.DEBUG_MEMORY_CACHE &&
+        logger.info(`[Cache] Error processing entry from ${cache.opts.namespace}`, {
+          error: error?.name,
+        });
+      const deleted = await cache.opts.store.delete(key);
+      if (!deleted) {
+        cacheConfig.DEBUG_MEMORY_CACHE &&
+          logger.warn(`[Cache] Error deleting entry from ${cache.opts.namespace}`);
+        continue;
+      }
+      cleared++;
+    }
+  }
+
+  if (cleared > 0) {
+    cacheConfig.DEBUG_MEMORY_CACHE &&
+      logger.info(
+        `[Cache] Cleared ${cleared} entries older than ${ttl}ms from ${cache.opts.namespace}`,
+      );
+  }
+}
+
+const auditCache = () => auditCacheStores(getTTLStores(), logger);
+
+/**
+ * Clears expired entries from all TTL-enabled stores
+ */
+async function clearAllExpiredFromCache() {
+  const ttlStores = getTTLStores();
+  await Promise.all(ttlStores.map((store) => clearExpiredFromCache(store)));
+
+  // Force garbage collection if available (Node.js with --expose-gc flag)
+  if (global.gc) {
+    global.gc();
+  }
+}
+
+if (!cacheConfig.USE_REDIS && !cacheConfig.CI) {
+  /** @type {Set<NodeJS.Timeout>} */
+  const cleanupIntervals = new Set();
+
+  // Clear expired entries every 30 seconds
+  const cleanup = setInterval(() => {
+    clearAllExpiredFromCache();
+  }, Time.THIRTY_SECONDS);
+
+  cleanupIntervals.add(cleanup);
+
+  if (cacheConfig.DEBUG_MEMORY_CACHE) {
+    const monitor = setInterval(() => {
+      const ttlStores = getTTLStores();
+      const memory = process.memoryUsage();
+      const totalSize = ttlStores.reduce((sum, store) => sum + (store.opts?.store?.size ?? 0), 0);
+
+      logger.info(formatMemoryUsage(memory, totalSize));
+
+      auditCache();
+    }, Time.ONE_MINUTE);
+
+    cleanupIntervals.add(monitor);
+  }
+
+  // Register cleanup with the centralized graceful-shutdown coordinator
+  // (see packages/api/src/app/shutdown.ts) rather than attaching a direct
+  // signal handler — multiple competing handlers race the HTTP drain.
+  registerShutdownTask('cache cleanup', async () => {
+    cacheConfig.DEBUG_MEMORY_CACHE && logger.info('[Cache] Cleaning up and shutting down...');
+    cleanupIntervals.forEach((interval) => clearInterval(interval));
+    cleanupIntervals.clear();
+    await clearAllExpiredFromCache();
+    cacheConfig.DEBUG_MEMORY_CACHE && logger.info('[Cache] Final cleanup completed');
+  });
+}
 
 /**
  * Returns the keyv cache specified by type.
@@ -76,3 +225,4 @@ const getLogStores = (key) => {
 };
 
 module.exports = getLogStores;
+module.exports.auditCache = auditCache;

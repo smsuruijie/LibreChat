@@ -1,46 +1,30 @@
+const mongoose = require('mongoose');
+const { MongoMemoryServer } = require('mongodb-memory-server');
+const { ViolationTypes } = require('librechat-data-provider');
+const { deleteAllUserSessions } = require('~/models');
+const getLogStores = require('./getLogStores');
 const banViolation = require('./banViolation');
 
-jest.mock('keyv');
-jest.mock('../models/Session');
-// Mocking the getLogStores function
-jest.mock('./getLogStores', () => {
-  return jest.fn().mockImplementation(() => {
-    const EventEmitter = require('events');
-    const math = require('../server/utils/math');
-    const mockGet = jest.fn();
-    const mockSet = jest.fn();
-    class KeyvMongo extends EventEmitter {
-      constructor(url = 'mongodb://127.0.0.1:27017', options) {
-        super();
-        this.ttlSupport = false;
-        url = url ?? {};
-        if (typeof url === 'string') {
-          url = { url };
-        }
-        if (url.uri) {
-          url = { url: url.uri, ...url };
-        }
-        this.opts = {
-          url,
-          collection: 'keyv',
-          ...url,
-          ...options,
-        };
-      }
-
-      get = mockGet;
-      set = mockSet;
-    }
-
-    return new KeyvMongo('', {
-      namespace: 'bans',
-      ttl: math(process.env.BAN_DURATION, 7200000),
-    });
-  });
-});
+// Mock deleteAllUserSessions since we're testing ban logic, not session deletion
+jest.mock('~/models', () => ({
+  ...jest.requireActual('~/models'),
+  deleteAllUserSessions: jest.fn().mockResolvedValue(true),
+}));
 
 describe('banViolation', () => {
+  let mongoServer;
   let req, res, errorMessage;
+
+  beforeAll(async () => {
+    mongoServer = await MongoMemoryServer.create();
+    const mongoUri = mongoServer.getUri();
+    await mongoose.connect(mongoUri);
+  });
+
+  afterAll(async () => {
+    await mongoose.disconnect();
+    await mongoServer.stop();
+  });
 
   beforeEach(() => {
     req = {
@@ -54,7 +38,7 @@ describe('banViolation', () => {
     };
     errorMessage = {
       type: 'someViolation',
-      user_id: '12345',
+      user_id: new mongoose.Types.ObjectId().toString(), // Use valid ObjectId
       prev_count: 0,
       violation_count: 0,
     };
@@ -98,6 +82,40 @@ describe('banViolation', () => {
     errorMessage.violation_count = randomValueAbove;
     await banViolation(req, res, errorMessage);
     expect(errorMessage.ban).toBeTruthy();
+  });
+
+  it.each(['127.0.0.1', '::1', '::ffff:127.0.0.1'])(
+    'bans only the user for a verified trigger request from %s',
+    async (ip) => {
+      const banLogs = getLogStores(ViolationTypes.BAN);
+      await banLogs.delete(ip);
+      req.ip = ip;
+      req._isAgentTrigger = true;
+      errorMessage.violation_count = 20;
+
+      await banViolation(req, res, errorMessage);
+
+      expect(await banLogs.get(errorMessage.user_id)).toEqual(
+        expect.objectContaining({ violation_count: 20 }),
+      );
+      expect(await banLogs.get(ip)).toBeUndefined();
+      expect(deleteAllUserSessions).toHaveBeenCalledWith({ userId: errorMessage.user_id });
+      expect(res.clearCookie).toHaveBeenCalledWith('refreshToken');
+      expect(errorMessage.ban).toBe(true);
+      expect(req.ip).toBe(ip);
+    },
+  );
+
+  it('still bans the IP when an ordinary request sends a trigger header', async () => {
+    req.headers = { 'x-lc-agent-trigger': '1' };
+    errorMessage.violation_count = 20;
+
+    await banViolation(req, res, errorMessage);
+
+    const banLogs = getLogStores(ViolationTypes.BAN);
+    expect(await banLogs.get(req.ip)).toEqual(
+      expect.objectContaining({ user_id: errorMessage.user_id, violation_count: 20 }),
+    );
   });
 
   it('should handle invalid BAN_INTERVAL and default to 20', async () => {

@@ -1,9 +1,14 @@
 import { PlaywrightTestConfig } from '@playwright/test';
 import mainConfig from './playwright.config';
+import { getLocalE2EEnv } from './setup/env';
 import path from 'path';
-const absolutePath = path.resolve(process.cwd(), 'api/server/index.js');
+const rootPath = path.resolve(__dirname, '..');
+const serverPath = path.resolve(rootPath, 'e2e/setup/start-server.js');
 import dotenv from 'dotenv';
 dotenv.config();
+
+const e2eEnv = getLocalE2EEnv();
+Object.assign(process.env, e2eEnv);
 
 const config: PlaywrightTestConfig = {
   ...mainConfig,
@@ -12,15 +17,8 @@ const config: PlaywrightTestConfig = {
   globalTeardown: require.resolve('./setup/global-teardown.local'),
   webServer: {
     ...mainConfig.webServer,
-    command: `node ${absolutePath}`,
-    env: {
-      ...process.env,
-      SEARCH: 'false',
-      NODE_ENV: 'CI',
-      TITLE_CONVO: 'false',
-      SESSION_EXPIRY: '60000',
-      REFRESH_TOKEN_EXPIRY: '300000',
-    },
+    command: `node ${serverPath}`,
+    cwd: rootPath,
   },
   fullyParallel: false, // if you are on Windows, keep this as `false`. On a Mac, `true` could make tests faster (maybe on some Windows too, just try)
   // workers: 1,

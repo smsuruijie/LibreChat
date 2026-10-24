@@ -1,22 +1,22 @@
 import { useState, useRef, useEffect } from 'react';
 import {
-  EModelEndpoint,
-  retrievalMimeTypes,
-  fileConfig as defaultFileConfig,
   mergeFileConfig,
+  retrievalMimeTypes,
+  getEndpointFileConfig,
 } from 'librechat-data-provider';
+import type { AssistantsEndpoint } from 'librechat-data-provider';
 import type { ExtendedFile } from '~/common';
 import FileRow from '~/components/Chat/Input/Files/FileRow';
 import { useGetFileConfig } from '~/data-provider';
 import { useFileHandling } from '~/hooks/Files';
-import useLocalize from '~/hooks/useLocalize';
 import { useChatContext } from '~/Providers';
+import { useLocalize } from '~/hooks';
 
 const CodeInterpreterFiles = ({ children }: { children: React.ReactNode }) => {
   const localize = useLocalize();
   return (
     <div>
-      <div className="text-token-text-tertiary mb-2 text-xs">
+      <div className="text-text-tertiary mb-2 text-xs">
         {localize('com_assistants_code_interpreter_files')}
       </div>
       {/* Files available to Code Interpreter only */}
@@ -26,9 +26,11 @@ const CodeInterpreterFiles = ({ children }: { children: React.ReactNode }) => {
 };
 
 export default function Knowledge({
+  endpoint,
   assistant_id,
   files: _files,
 }: {
+  endpoint: AssistantsEndpoint;
   assistant_id: string;
   files?: [string, ExtendedFile][];
 }) {
@@ -36,11 +38,10 @@ export default function Knowledge({
   const { setFilesLoading } = useChatContext();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [files, setFiles] = useState<Map<string, ExtendedFile>>(new Map());
-  const { data: fileConfig = defaultFileConfig } = useGetFileConfig({
+  const { data: fileConfig = null } = useGetFileConfig({
     select: (data) => mergeFileConfig(data),
   });
   const { handleFileChange } = useFileHandling({
-    overrideEndpoint: EModelEndpoint.assistants,
     additionalMetadata: { assistant_id },
     fileSetter: setFiles,
   });
@@ -51,9 +52,14 @@ export default function Knowledge({
     }
   }, [_files]);
 
-  const endpointFileConfig = fileConfig.endpoints[EModelEndpoint.assistants];
+  const endpointFileConfig = getEndpointFileConfig({
+    fileConfig,
+    endpoint,
+    endpointType: endpoint,
+  });
+  const isUploadDisabled = endpointFileConfig?.disabled ?? false;
 
-  if (endpointFileConfig?.disabled) {
+  if (isUploadDisabled) {
     return null;
   }
 
@@ -69,7 +75,7 @@ export default function Knowledge({
     <div className="mb-6">
       <div className="mb-1.5 flex items-center">
         <span>
-          <label className="text-token-text-primary block font-medium">
+          <label className="text-text-primary block font-medium">
             {assistant_id
               ? localize('com_assistants_knowledge')
               : localize('com_assistants_knowledge_disabled')}
@@ -77,7 +83,7 @@ export default function Knowledge({
         </span>
       </div>
       <div className="flex flex-col gap-4">
-        <div className="text-token-text-tertiary rounded-lg">
+        <div className="text-text-tertiary rounded-lg">
           {assistant_id ? localize('com_assistants_knowledge_info') : ''}
         </div>
         {/* Files available to both tools */}
@@ -105,14 +111,14 @@ export default function Knowledge({
           <button
             type="button"
             disabled={!assistant_id}
-            className="btn btn-neutral border-token-border-light relative h-8 rounded-lg font-medium"
+            className="btn btn-neutral border-border-light relative h-8 rounded-lg font-medium"
             onClick={handleButtonClick}
           >
             <div className="flex w-full items-center justify-center gap-2">
               <input
                 multiple={true}
                 type="file"
-                style={{ display: 'none' }}
+                className="hidden"
                 tabIndex={-1}
                 ref={fileInputRef}
                 disabled={!assistant_id}

@@ -1,50 +1,73 @@
 import { useState, useMemo, useEffect } from 'react';
-import { useQueryClient } from '@tanstack/react-query';
+import { useGetModelsQuery } from 'librechat-data-provider/react-query';
+import { Spinner, useToastContext, SelectDropDown } from '@librechat/client';
 import { useForm, FormProvider, Controller, useWatch } from 'react-hook-form';
-import { useGetModelsQuery, useGetEndpointsQuery } from 'librechat-data-provider/react-query';
 import {
   Tools,
-  QueryKeys,
   Capabilities,
-  EModelEndpoint,
-  actionDelimiter,
+  isActionTool,
+  ImageVisionTool,
+  LocalStorageKeys,
   defaultAssistantFormValues,
 } from 'librechat-data-provider';
-import type { AssistantForm, AssistantPanelProps } from '~/common';
-import type { FunctionTool, TPlugin, TEndpointsConfig } from 'librechat-data-provider';
-import { useCreateAssistantMutation, useUpdateAssistantMutation } from '~/data-provider';
-import { SelectDropDown, Checkbox, QuestionMark } from '~/components/ui';
-import { useAssistantsMapContext, useToastContext } from '~/Providers';
-import { useSelectAssistant, useLocalize } from '~/hooks';
-import { ToolSelectDialog } from '~/components/Tools';
+import type { FunctionTool, TConfig } from 'librechat-data-provider';
+import type { AssistantForm, AssistantPanelProps, LastSelectedModels } from '~/common';
+import {
+  useCreateAssistantMutation,
+  useUpdateAssistantMutation,
+  useAvailableAgentToolsQuery,
+} from '~/data-provider';
+import {
+  cn,
+  cardStyle,
+  defaultTextProps,
+  getAvailableModelSelection,
+  removeFocusOutlines,
+} from '~/utils';
+import AssistantConversationStarters from './AssistantConversationStarters';
+import AssistantToolsDialog from '~/components/Tools/AssistantToolsDialog';
+import { useSelectAssistant, useLocalize, useLocalStorage } from '~/hooks';
+import { useAssistantsMapContext } from '~/Providers';
+import AppendDateCheckbox from './AppendDateCheckbox';
+import CapabilitiesForm from './CapabilitiesForm';
 import AssistantAvatar from './AssistantAvatar';
 import AssistantSelect from './AssistantSelect';
-import AssistantAction from './AssistantAction';
 import ContextButton from './ContextButton';
 import AssistantTool from './AssistantTool';
-import { Spinner } from '~/components/svg';
-import { cn, cardStyle } from '~/utils/';
 import Knowledge from './Knowledge';
 import { Panel } from '~/common';
+import Action from './Action';
 
-const labelClass = 'mb-2 block text-xs font-bold text-gray-700 dark:text-gray-400';
-const inputClass =
-  'focus:shadow-outline w-full appearance-none rounded-md border px-3 py-2 text-sm leading-tight text-gray-700 dark:text-white shadow focus:border-green-500 focus:outline-none focus:ring-0 dark:bg-gray-800 dark:border-gray-700/80';
+const labelClass = 'mb-2 text-text-primary block font-medium';
+const inputClass = cn(
+  defaultTextProps,
+  'flex w-full px-3 py-2 bg-surface-secondary rounded-xl mb-2',
+  removeFocusOutlines,
+);
 
 export default function AssistantPanel({
   // index = 0,
   setAction,
+  endpoint,
   actions = [],
   setActivePanel,
+  documentsMap,
   assistant_id: current_assistant_id,
   setCurrentAssistantId,
-}: AssistantPanelProps) {
-  const queryClient = useQueryClient();
-  const modelsQuery = useGetModelsQuery();
+  assistantsConfig,
+  version,
+}: AssistantPanelProps & { assistantsConfig?: TConfig | null }) {
+  const modelsQuery = useGetModelsQuery({ refetchOnMount: 'always' });
+  const models = useMemo(() => modelsQuery.data?.[endpoint] ?? [], [endpoint, modelsQuery.data]);
+  const modelsReady = modelsQuery.isFetchedAfterMount && !modelsQuery.isFetching;
+  const [lastSelectedModels] = useLocalStorage<LastSelectedModels | undefined>(
+    LocalStorageKeys.LAST_MODEL,
+    {} as LastSelectedModels,
+  );
   const assistantMap = useAssistantsMapContext();
-  const { data: endpointsConfig = {} as TEndpointsConfig } = useGetEndpointsQuery();
-  const allTools = queryClient.getQueryData<TPlugin[]>([QueryKeys.tools]) ?? [];
-  const { onSelect: onSelectAssistant } = useSelectAssistant();
+
+  const { data: allTools = [] } = useAvailableAgentToolsQuery();
+  const { onSelect: onSelectAssistant } = useSelectAssistant(endpoint);
   const { showToast } = useToastContext();
   const localize = useLocalize();
 
@@ -54,40 +77,62 @@ export default function AssistantPanel({
 
   const [showToolDialog, setShowToolDialog] = useState(false);
 
-  const { control, handleSubmit, reset, setValue, getValues } = methods;
+  const {
+    control,
+    handleSubmit,
+    reset,
+    setValue,
+    getValues,
+    formState: { dirtyFields },
+  } = methods;
   const assistant = useWatch({ control, name: 'assistant' });
   const functions = useWatch({ control, name: 'functions' });
   const assistant_id = useWatch({ control, name: 'id' });
   const model = useWatch({ control, name: 'model' });
 
-  const activeModel = useMemo(() => {
-    return assistantMap?.[assistant_id]?.model;
-  }, [assistantMap, assistant_id]);
+  useEffect(() => {
+    if (!modelsReady || !modelsQuery.isSuccess || current_assistant_id || assistant_id) {
+      return;
+    }
 
-  const assistants = useMemo(() => endpointsConfig?.[EModelEndpoint.assistants], [endpointsConfig]);
-  const retrievalModels = useMemo(() => new Set(assistants?.retrievalModels ?? []), [assistants]);
+    const candidate = dirtyFields.model === true ? model : (lastSelectedModels?.[endpoint] ?? '');
+    const nextModel = getAvailableModelSelection(candidate, models);
+    if (nextModel !== model) {
+      setValue('model', nextModel, { shouldDirty: false });
+    }
+  }, [
+    assistant_id,
+    current_assistant_id,
+    dirtyFields.model,
+    endpoint,
+    lastSelectedModels,
+    model,
+    models,
+    modelsQuery.isSuccess,
+    modelsReady,
+    setValue,
+  ]);
+
+  const activeModel = useMemo(() => {
+    return assistantMap?.[endpoint]?.[assistant_id]?.model;
+  }, [assistantMap, endpoint, assistant_id]);
+
   const toolsEnabled = useMemo(
-    () => assistants?.capabilities?.includes(Capabilities.tools),
-    [assistants],
+    () => assistantsConfig?.capabilities?.includes(Capabilities.tools),
+    [assistantsConfig],
   );
   const actionsEnabled = useMemo(
-    () => assistants?.capabilities?.includes(Capabilities.actions),
-    [assistants],
+    () => assistantsConfig?.capabilities?.includes(Capabilities.actions),
+    [assistantsConfig],
   );
   const retrievalEnabled = useMemo(
-    () => assistants?.capabilities?.includes(Capabilities.retrieval),
-    [assistants],
+    () => assistantsConfig?.capabilities?.includes(Capabilities.retrieval),
+    [assistantsConfig],
   );
   const codeEnabled = useMemo(
-    () => assistants?.capabilities?.includes(Capabilities.code_interpreter),
-    [assistants],
+    () => assistantsConfig?.capabilities?.includes(Capabilities.code_interpreter),
+    [assistantsConfig],
   );
-
-  useEffect(() => {
-    if (model && !retrievalModels.has(model)) {
-      setValue(Capabilities.retrieval, false);
-    }
-  }, [model, setValue, retrievalModels]);
 
   /* Mutations */
   const update = useUpdateAssistantMutation({
@@ -102,12 +147,13 @@ export default function AssistantPanel({
       const error = err as Error;
       showToast({
         message: `${localize('com_assistants_update_error')}${
-          error?.message ? ` ${localize('com_ui_error')}: ${error?.message}` : ''
+          error.message ? ` ${localize('com_ui_error')}: ${error.message}` : ''
         }`,
         status: 'error',
       });
     },
   });
+
   const create = useCreateAssistantMutation({
     onSuccess: (data) => {
       setCurrentAssistantId(data.id);
@@ -121,7 +167,7 @@ export default function AssistantPanel({
       const error = err as Error;
       showToast({
         message: `${localize('com_assistants_create_error')}${
-          error?.message ? ` ${localize('com_ui_error')}: ${error?.message}` : ''
+          error.message ? ` ${localize('com_ui_error')}: ${error.message}` : ''
         }`,
         status: 'error',
       });
@@ -137,10 +183,10 @@ export default function AssistantPanel({
 
   const onSubmit = (data: AssistantForm) => {
     const tools: Array<FunctionTool | string> = [...functions].map((functionName) => {
-      if (!functionName.includes(actionDelimiter)) {
+      if (!isActionTool(functionName)) {
         return functionName;
       } else {
-        const assistant = assistantMap?.[assistant_id];
+        const assistant = assistantMap?.[endpoint]?.[assistant_id];
         const tool = assistant?.tools?.find((tool) => tool.function?.name === functionName);
         if (assistant && tool) {
           return tool;
@@ -150,20 +196,23 @@ export default function AssistantPanel({
       return functionName;
     });
 
-    console.log(data);
     if (data.code_interpreter) {
       tools.push({ type: Tools.code_interpreter });
     }
     if (data.retrieval) {
-      tools.push({ type: Tools.retrieval });
+      tools.push({ type: version == 2 ? Tools.file_search : Tools.retrieval });
+    }
+    if (data.image_vision) {
+      tools.push(ImageVisionTool);
     }
 
     const {
       name,
       description,
       instructions,
+      conversation_starters: starters,
       model,
-      // file_ids, // TODO: add file handling here
+      append_current_datetime,
     } = data;
 
     if (assistant_id) {
@@ -173,8 +222,11 @@ export default function AssistantPanel({
           name,
           description,
           instructions,
+          conversation_starters: starters.filter((starter) => starter.trim() !== ''),
           model,
           tools,
+          endpoint,
+          append_current_datetime,
         },
       });
       return;
@@ -184,16 +236,30 @@ export default function AssistantPanel({
       name,
       description,
       instructions,
+      conversation_starters: starters.filter((starter) => starter.trim() !== ''),
       model,
       tools,
+      endpoint,
+      version,
+      append_current_datetime,
     });
   };
+
+  let submitContext: string | JSX.Element;
+
+  if (create.isLoading || update.isLoading) {
+    submitContext = <Spinner className="icon-md" />;
+  } else if (assistant_id) {
+    submitContext = localize('com_ui_save');
+  } else {
+    submitContext = localize('com_ui_create');
+  }
 
   return (
     <FormProvider {...methods}>
       <form
         onSubmit={handleSubmit(onSubmit)}
-        className="h-auto w-full flex-shrink-0 overflow-x-hidden"
+        className="h-auto w-full shrink-0 overflow-x-hidden pt-2"
       >
         <div className="flex w-full flex-wrap">
           <Controller
@@ -203,6 +269,9 @@ export default function AssistantPanel({
               <AssistantSelect
                 reset={reset}
                 value={field.value}
+                endpoint={endpoint}
+                documentsMap={documentsMap}
+                allTools={allTools}
                 setCurrentAssistantId={setCurrentAssistantId}
                 selectedAssistant={current_assistant_id ?? null}
                 createMutation={create}
@@ -212,7 +281,7 @@ export default function AssistantPanel({
           {/* Select Button */}
           {assistant_id && (
             <button
-              className="btn btn-primary focus:shadow-outline mx-2 mt-1 h-[40px] rounded bg-green-500 px-4 py-2 font-semibold text-white hover:bg-green-400 focus:border-green-500 focus:outline-none focus:ring-0"
+              className="btn bg-surface-submit text-text-on-status hover:bg-surface-submit-hover focus-visible:ring-text-primary focus-visible:ring-offset-surface-primary mx-2 mt-1 h-[2.5rem] rounded px-4 py-2 font-semibold focus:outline-hidden focus-visible:ring-2 focus-visible:ring-offset-2"
               type="button"
               disabled={!assistant_id}
               onClick={(e) => {
@@ -224,13 +293,15 @@ export default function AssistantPanel({
             </button>
           )}
         </div>
-        <div className="h-auto bg-white px-4 pb-8 pt-3 dark:bg-transparent">
+        <div className="bg-surface-primary h-auto px-4 pt-3 pb-8">
           {/* Avatar & Name */}
           <div className="mb-4">
             <AssistantAvatar
               createMutation={create}
-              assistant_id={assistant_id ?? null}
-              metadata={assistant?.['metadata'] ?? null}
+              assistant_id={assistant_id}
+              metadata={assistant['metadata'] ?? null}
+              endpoint={endpoint}
+              version={version}
             />
             <label className={labelClass} htmlFor="name">
               {localize('com_ui_name')}
@@ -254,7 +325,7 @@ export default function AssistantPanel({
               name="id"
               control={control}
               render={({ field }) => (
-                <p className="h-3 text-xs italic text-gray-600">{field.value ?? ''}</p>
+                <p className="text-text-secondary h-3 text-xs italic">{field.value}</p>
               )}
             />
           </div>
@@ -293,10 +364,30 @@ export default function AssistantPanel({
                   {...field}
                   value={field.value ?? ''}
                   {...{ max: 32768 }}
-                  className="focus:shadow-outline min-h-[150px] w-full resize-none resize-y appearance-none rounded-md border px-3 py-2 text-sm leading-tight text-gray-700 shadow focus:border-green-500 focus:outline-none focus:ring-0 dark:border-gray-700/80 dark:bg-gray-800 dark:text-white"
+                  className={cn(inputClass, 'min-h-[6.25rem] resize-y')}
                   id="instructions"
                   placeholder={localize('com_assistants_instructions_placeholder')}
                   rows={3}
+                />
+              )}
+            />
+          </div>
+
+          {/* Append Today's Date */}
+          <AppendDateCheckbox control={control} setValue={setValue} getValues={getValues} />
+
+          {/* Conversation Starters */}
+          <div className="relative mb-6">
+            {/* the label of conversation starters is in the component */}
+            <Controller
+              name="conversation_starters"
+              control={control}
+              defaultValue={[]}
+              render={({ field }) => (
+                <AssistantConversationStarters
+                  field={field}
+                  inputClass={inputClass}
+                  labelClass={labelClass}
                 />
               )}
             />
@@ -309,117 +400,58 @@ export default function AssistantPanel({
             <Controller
               name="model"
               control={control}
-              render={({ field }) => (
-                <SelectDropDown
-                  emptyTitle={true}
-                  value={field.value}
-                  setValue={field.onChange}
-                  availableValues={modelsQuery.data?.[EModelEndpoint.assistants] ?? []}
-                  showAbove={false}
-                  showLabel={false}
-                  className={cn(
-                    cardStyle,
-                    'flex h-[40px] w-full flex-none items-center justify-center px-4 hover:cursor-pointer',
+              rules={{ required: true, minLength: 1 }}
+              render={({ field, fieldState: { error } }) => (
+                <>
+                  <SelectDropDown
+                    emptyTitle={true}
+                    value={field.value}
+                    setValue={field.onChange}
+                    availableValues={models}
+                    disabled={!modelsReady}
+                    showAbove={false}
+                    showLabel={false}
+                    className={cn(
+                      cardStyle,
+                      'flex h-[2.5rem] w-full flex-none items-center justify-center px-4 hover:cursor-pointer',
+                    )}
+                    containerClassName={cn(
+                      'rounded-md',
+                      error ? 'border-border-destructive border-2' : '',
+                    )}
+                  />
+                  {error && (
+                    <span className="text-text-destructive text-sm transition duration-300 ease-in-out">
+                      {localize('com_ui_field_required')}
+                    </span>
                   )}
-                />
+                </>
               )}
             />
           </div>
           {/* Knowledge */}
-          {(codeEnabled || retrievalEnabled) && (
-            <Knowledge assistant_id={assistant_id} files={files} />
+          {(codeEnabled === true || retrievalEnabled === true) && version == 1 && (
+            <Knowledge assistant_id={assistant_id} files={files} endpoint={endpoint} />
           )}
           {/* Capabilities */}
-          <div className="mb-6">
-            <div className="mb-1.5 flex items-center">
-              <span>
-                <label className="text-token-text-primary block font-medium">
-                  {localize('com_assistants_capabilities')}
-                </label>
-              </span>
-            </div>
-            <div className="flex flex-col items-start gap-2">
-              {codeEnabled && (
-                <div className="flex items-center">
-                  <Controller
-                    name={Capabilities.code_interpreter}
-                    control={control}
-                    render={({ field }) => (
-                      <Checkbox
-                        {...field}
-                        checked={field.value}
-                        onCheckedChange={field.onChange}
-                        className="relative float-left  mr-2 inline-flex h-4 w-4 cursor-pointer"
-                        value={field?.value?.toString()}
-                      />
-                    )}
-                  />
-                  <label
-                    className="form-check-label text-token-text-primary w-full cursor-pointer"
-                    htmlFor={Capabilities.code_interpreter}
-                    onClick={() =>
-                      setValue(
-                        Capabilities.code_interpreter,
-                        !getValues(Capabilities.code_interpreter),
-                        {
-                          shouldDirty: true,
-                        },
-                      )
-                    }
-                  >
-                    <div className="flex items-center">
-                      {localize('com_assistants_code_interpreter')}
-                      <QuestionMark />
-                    </div>
-                  </label>
-                </div>
-              )}
-              {retrievalEnabled && (
-                <div className="flex items-center">
-                  <Controller
-                    name={Capabilities.retrieval}
-                    control={control}
-                    render={({ field }) => (
-                      <Checkbox
-                        {...field}
-                        checked={field.value}
-                        disabled={!retrievalModels.has(model)}
-                        onCheckedChange={field.onChange}
-                        className="relative float-left  mr-2 inline-flex h-4 w-4 cursor-pointer"
-                        value={field?.value?.toString()}
-                      />
-                    )}
-                  />
-                  <label
-                    className={cn(
-                      'form-check-label text-token-text-primary w-full',
-                      !retrievalModels.has(model) ? 'cursor-no-drop opacity-50' : 'cursor-pointer',
-                    )}
-                    htmlFor={Capabilities.retrieval}
-                    onClick={() =>
-                      retrievalModels.has(model) &&
-                      setValue(Capabilities.retrieval, !getValues(Capabilities.retrieval), {
-                        shouldDirty: true,
-                      })
-                    }
-                  >
-                    {localize('com_assistants_retrieval')}
-                  </label>
-                </div>
-              )}
-            </div>
-          </div>
+          <CapabilitiesForm
+            version={version}
+            endpoint={endpoint}
+            codeEnabled={codeEnabled}
+            assistantsConfig={assistantsConfig}
+            retrievalEnabled={retrievalEnabled}
+          />
           {/* Tools */}
           <div className="mb-6">
             <label className={labelClass}>
-              {`${toolsEnabled ? localize('com_assistants_tools') : ''}
-              ${toolsEnabled && actionsEnabled ? ' + ' : ''}
-              ${actionsEnabled ? localize('com_assistants_actions') : ''}`}
+              {`${toolsEnabled === true ? localize('com_ui_tools') : ''}
+              ${toolsEnabled === true && actionsEnabled === true ? '+ ' : ''}
+              ${actionsEnabled === true ? localize('com_assistants_actions') : ''}`}
             </label>
-            <div className="space-y-1">
-              {functions.map((func) => (
+            <div className="space-y-2">
+              {functions.map((func, i) => (
                 <AssistantTool
-                  key={func}
+                  key={`${func}-${i}-${assistant_id}`}
                   tool={func}
                   allTools={allTools}
                   assistant_id={assistant_id}
@@ -428,41 +460,41 @@ export default function AssistantPanel({
               {actions
                 .filter((action) => action.assistant_id === assistant_id)
                 .map((action, i) => {
-                  return (
-                    <AssistantAction key={i} action={action} onClick={() => setAction(action)} />
-                  );
+                  return <Action key={i} action={action} onClick={() => setAction(action)} />;
                 })}
-              {toolsEnabled && (
-                <button
-                  type="button"
-                  onClick={() => setShowToolDialog(true)}
-                  className="btn border-token-border-light relative mx-1 mt-2 h-8 rounded-lg bg-transparent font-medium hover:bg-gray-100 dark:hover:bg-gray-800"
-                >
-                  <div className="flex w-full items-center justify-center gap-2">
-                    {localize('com_assistants_add_tools')}
-                  </div>
-                </button>
-              )}
-              {actionsEnabled && (
-                <button
-                  type="button"
-                  disabled={!assistant_id}
-                  onClick={() => {
-                    if (!assistant_id) {
-                      return showToast({
-                        message: localize('com_assistants_actions_disabled'),
-                        status: 'warning',
-                      });
-                    }
-                    setActivePanel(Panel.actions);
-                  }}
-                  className="btn border-token-border-light relative mt-2 h-8 rounded-lg bg-transparent font-medium hover:bg-gray-100 dark:hover:bg-gray-800"
-                >
-                  <div className="flex w-full items-center justify-center gap-2">
-                    {localize('com_assistants_add_actions')}
-                  </div>
-                </button>
-              )}
+              <div className="flex space-x-2">
+                {toolsEnabled === true && (
+                  <button
+                    type="button"
+                    onClick={() => setShowToolDialog(true)}
+                    className="btn btn-neutral border-border-light relative h-8 w-full rounded-lg font-medium"
+                  >
+                    <div className="flex w-full items-center justify-center gap-2">
+                      {localize('com_assistants_add_tools')}
+                    </div>
+                  </button>
+                )}
+                {actionsEnabled === true && (
+                  <button
+                    type="button"
+                    disabled={!assistant_id}
+                    onClick={() => {
+                      if (!assistant_id) {
+                        return showToast({
+                          message: localize('com_assistants_actions_disabled'),
+                          status: 'warning',
+                        });
+                      }
+                      setActivePanel(Panel.actions);
+                    }}
+                    className="btn btn-neutral border-border-light relative h-8 w-full rounded-lg font-medium"
+                  >
+                    <div className="flex w-full items-center justify-center gap-2">
+                      {localize('com_assistants_add_actions')}
+                    </div>
+                  </button>
+                )}
+              </div>
             </div>
           </div>
           <div className="flex items-center justify-end gap-2">
@@ -472,40 +504,21 @@ export default function AssistantPanel({
               activeModel={activeModel}
               setCurrentAssistantId={setCurrentAssistantId}
               createMutation={create}
+              endpoint={endpoint}
             />
-            {/* Secondary Select Button */}
-            {assistant_id && (
-              <button
-                className="btn btn-secondary"
-                type="button"
-                disabled={!assistant_id}
-                onClick={(e) => {
-                  e.preventDefault();
-                  onSelectAssistant(assistant_id);
-                }}
-              >
-                {localize('com_ui_select')}
-              </button>
-            )}
             {/* Submit Button */}
             <button
-              className="btn btn-primary focus:shadow-outline flex w-[90px] items-center justify-center px-4 py-2 font-semibold text-white hover:bg-green-600 focus:border-green-500"
+              className="btn bg-surface-submit text-text-on-status hover:bg-surface-submit-hover focus-visible:ring-text-primary focus-visible:ring-offset-surface-primary flex w-full items-center justify-center px-4 py-2 font-semibold focus:outline-hidden focus-visible:ring-2 focus-visible:ring-offset-2"
               type="submit"
             >
-              {create.isLoading || update.isLoading ? (
-                <Spinner className="icon-md" />
-              ) : assistant_id ? (
-                localize('com_ui_save')
-              ) : (
-                localize('com_ui_create')
-              )}
+              {submitContext}
             </button>
           </div>
         </div>
-        <ToolSelectDialog
+        <AssistantToolsDialog
+          endpoint={endpoint}
           isOpen={showToolDialog}
           setIsOpen={setShowToolDialog}
-          assistant_id={assistant_id}
         />
       </form>
     </FormProvider>

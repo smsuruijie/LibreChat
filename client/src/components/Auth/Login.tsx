@@ -1,177 +1,140 @@
-import { useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
-import { useGetStartupConfig } from 'librechat-data-provider/react-query';
-import { GoogleIcon, FacebookIcon, OpenIDIcon, GithubIcon, DiscordIcon } from '~/components';
+import { useEffect, useState } from 'react';
+import { OpenIDIcon, useToastContext } from '@librechat/client';
+import { ErrorTypes, registerPage } from 'librechat-data-provider';
+import { useOutletContext, useSearchParams, useLocation } from 'react-router-dom';
+import type { TLoginLayoutContext } from '~/common';
+import type { TranslationKeys } from '~/hooks';
+import { getLoginError, persistRedirectToSession } from '~/utils';
+import { ErrorMessage } from '~/components/Auth/ErrorMessage';
+import SocialButton from '~/components/Auth/SocialButton';
 import { useAuthContext } from '~/hooks/AuthContext';
-import { ThemeSelector } from '~/components/ui';
-import SocialButton from './SocialButton';
-import { getLoginError } from '~/utils';
 import { useLocalize } from '~/hooks';
 import LoginForm from './LoginForm';
 
+interface LoginLocationState {
+  redirect_to?: string;
+}
+
+/** Error codes the server appends to the login redirect when an OAuth navigation is rejected. */
+const oauthErrorKeys: Record<string, TranslationKeys> = {
+  [ErrorTypes.AUTH_FAILED]: 'com_auth_error_oauth_failed',
+  [ErrorTypes.AUTH_RATE_LIMITED]: 'com_auth_error_login_rl',
+  [ErrorTypes.AUTH_BANNED]: 'com_auth_error_login_ban',
+};
+
 function Login() {
-  const { login, error, isAuthenticated } = useAuthContext();
-  const { data: startupConfig } = useGetStartupConfig();
   const localize = useLocalize();
-  const navigate = useNavigate();
+  const { showToast } = useToastContext();
+  const { error, setError, login } = useAuthContext();
+  const { startupConfig } = useOutletContext<TLoginLayoutContext>();
+
+  const [searchParams, setSearchParams] = useSearchParams();
+  const location = useLocation();
+  const disableAutoRedirect = searchParams.get('redirect') === 'false';
+
+  const [isAutoRedirectDisabled, setIsAutoRedirectDisabled] = useState(disableAutoRedirect);
 
   useEffect(() => {
-    if (isAuthenticated) {
-      navigate('/c/new', { replace: true });
+    const redirectTo = searchParams.get('redirect_to');
+    if (redirectTo) {
+      persistRedirectToSession(redirectTo);
+    } else {
+      const state = location.state as LoginLocationState | null;
+      if (state?.redirect_to) {
+        persistRedirectToSession(state.redirect_to);
+      }
     }
-  }, [isAuthenticated, navigate]);
 
-  if (!startupConfig) {
-    return null;
+    const oauthError = searchParams?.get('error');
+    /** `hasOwn` keeps an attacker-supplied `?error=toString` off the prototype chain. */
+    const oauthErrorKey =
+      oauthError != null && Object.hasOwn(oauthErrorKeys, oauthError)
+        ? oauthErrorKeys[oauthError]
+        : undefined;
+    if (oauthErrorKey != null) {
+      showToast({
+        message: localize(oauthErrorKey),
+        status: 'error',
+      });
+      const newParams = new URLSearchParams(searchParams);
+      newParams.delete('error');
+      setSearchParams(newParams, { replace: true });
+    }
+  }, [searchParams, setSearchParams, showToast, localize, location.state]);
+
+  useEffect(() => {
+    if (disableAutoRedirect) {
+      setIsAutoRedirectDisabled(true);
+      const newParams = new URLSearchParams(searchParams);
+      newParams.delete('redirect');
+      setSearchParams(newParams, { replace: true });
+    }
+  }, [disableAutoRedirect, searchParams, setSearchParams]);
+
+  const shouldAutoRedirect =
+    startupConfig?.openidLoginEnabled &&
+    startupConfig?.openidAutoRedirect &&
+    startupConfig?.serverDomain &&
+    !isAutoRedirectDisabled;
+
+  useEffect(() => {
+    if (shouldAutoRedirect) {
+      console.log('Auto-redirecting to OpenID provider...');
+      window.location.href = `${startupConfig.serverDomain}/oauth/openid`;
+    }
+  }, [shouldAutoRedirect, startupConfig]);
+
+  if (shouldAutoRedirect) {
+    return (
+      <div className="flex min-h-screen flex-col items-center justify-center p-4">
+        <p className="text-lg font-semibold">
+          {localize('com_ui_redirecting_to_provider', { 0: startupConfig.openidLabel })}
+        </p>
+        <div className="mt-4">
+          <SocialButton
+            key="openid"
+            enabled={startupConfig.openidLoginEnabled}
+            serverDomain={startupConfig.serverDomain}
+            oauthPath="openid"
+            Icon={() =>
+              startupConfig.openidImageUrl ? (
+                <img src={startupConfig.openidImageUrl} alt="OpenID Logo" className="h-5 w-5" />
+              ) : (
+                <OpenIDIcon />
+              )
+            }
+            label={startupConfig.openidLabel}
+            id="openid"
+          />
+        </div>
+      </div>
+    );
   }
 
-  const socialLogins = startupConfig.socialLogins ?? [];
-
-  const providerComponents = {
-    discord: (
-      <SocialButton
-        key="discord"
-        enabled={startupConfig.discordLoginEnabled}
-        serverDomain={startupConfig.serverDomain}
-        oauthPath="discord"
-        Icon={DiscordIcon}
-        label={localize('com_auth_discord_login')}
-        id="discord"
-      />
-    ),
-    facebook: (
-      <SocialButton
-        key="facebook"
-        enabled={startupConfig.facebookLoginEnabled}
-        serverDomain={startupConfig.serverDomain}
-        oauthPath="facebook"
-        Icon={FacebookIcon}
-        label={localize('com_auth_facebook_login')}
-        id="facebook"
-      />
-    ),
-    github: (
-      <SocialButton
-        key="github"
-        enabled={startupConfig.githubLoginEnabled}
-        serverDomain={startupConfig.serverDomain}
-        oauthPath="github"
-        Icon={GithubIcon}
-        label={localize('com_auth_github_login')}
-        id="github"
-      />
-    ),
-    google: (
-      <SocialButton
-        key="google"
-        enabled={startupConfig.googleLoginEnabled}
-        serverDomain={startupConfig.serverDomain}
-        oauthPath="google"
-        Icon={GoogleIcon}
-        label={localize('com_auth_google_login')}
-        id="google"
-      />
-    ),
-    openid: (
-      <SocialButton
-        key="openid"
-        enabled={startupConfig.openidLoginEnabled}
-        serverDomain={startupConfig.serverDomain}
-        oauthPath="openid"
-        Icon={() =>
-          startupConfig.openidImageUrl ? (
-            <img src={startupConfig.openidImageUrl} alt="OpenID Logo" className="h-5 w-5" />
-          ) : (
-            <OpenIDIcon />
-          )
-        }
-        label={startupConfig.openidLabel}
-        id="openid"
-      />
-    ),
-  };
-
-  const privacyPolicy = startupConfig.interface?.privacyPolicy;
-  const termsOfService = startupConfig.interface?.termsOfService;
-
-  const privacyPolicyRender = privacyPolicy?.externalUrl && (
-    <a
-      className="text-xs font-medium text-green-500"
-      href={privacyPolicy.externalUrl}
-      target={privacyPolicy.openNewTab ? '_blank' : undefined}
-      rel="noreferrer"
-    >
-      {localize('com_ui_privacy_policy')}
-    </a>
-  );
-
-  const termsOfServiceRender = termsOfService?.externalUrl && (
-    <a
-      className="text-xs font-medium text-green-500"
-      href={termsOfService.externalUrl}
-      target={termsOfService.openNewTab ? '_blank' : undefined}
-      rel="noreferrer"
-    >
-      {localize('com_ui_terms_of_service')}
-    </a>
-  );
-
   return (
-    <div className="flex min-h-screen flex-col items-center justify-center bg-white pt-6 dark:bg-gray-900 sm:pt-0">
-      <div className="absolute bottom-0 left-0 m-4">
-        <ThemeSelector />
-      </div>
-      <div className="mt-6 w-authPageWidth overflow-hidden bg-white px-6 py-4 dark:bg-gray-900 sm:max-w-md sm:rounded-lg">
-        <h1
-          className="mb-4 text-center text-3xl font-semibold text-black dark:text-white"
-          style={{ userSelect: 'none' }}
-        >
-          {localize('com_auth_welcome_back')}
-        </h1>
-        {error && (
-          <div
-            className="rounded-md border border-red-500 bg-red-500/10 px-3 py-2 text-sm text-gray-600 dark:text-gray-200"
-            role="alert"
+    <>
+      {error != null && <ErrorMessage>{localize(getLoginError(error))}</ErrorMessage>}
+      {startupConfig?.emailLoginEnabled === true && (
+        <LoginForm
+          onSubmit={login}
+          startupConfig={startupConfig}
+          error={error}
+          setError={setError}
+        />
+      )}
+      {startupConfig?.registrationEnabled === true && (
+        <p className="text-text-secondary my-4 text-center text-sm font-light">
+          {' '}
+          {localize('com_auth_no_account')}{' '}
+          <a
+            href={registerPage()}
+            className="text-accent-primary hover:text-accent-primary-hover hover:decoration-accent-primary-hover focus:text-accent-primary-hover focus:decoration-accent-primary-hover inline-flex p-1 text-sm font-medium underline decoration-transparent transition-all duration-200"
           >
-            {localize(getLoginError(error))}
-          </div>
-        )}
-        {startupConfig.emailLoginEnabled && <LoginForm onSubmit={login} />}
-        {startupConfig.registrationEnabled && (
-          <p className="my-4 text-center text-sm font-light text-gray-700 dark:text-white">
-            {' '}
-            {localize('com_auth_no_account')}{' '}
-            <a href="/register" className="p-1 font-medium text-green-500">
-              {localize('com_auth_sign_up')}
-            </a>
-          </p>
-        )}
-        {startupConfig.socialLoginEnabled && (
-          <>
-            {startupConfig.emailLoginEnabled && (
-              <>
-                <div className="relative mt-6 flex w-full items-center justify-center border border-t uppercase">
-                  <div className="absolute bg-white px-3 text-xs text-black dark:bg-gray-900 dark:text-white">
-                    Or
-                  </div>
-                </div>
-                <div className="mt-8" />
-              </>
-            )}
-            <div className="mt-2">
-              {socialLogins.map((provider) => providerComponents[provider] || null)}
-            </div>
-          </>
-        )}
-      </div>
-      <div className="flex justify-center gap-4 align-middle">
-        {privacyPolicyRender}
-        {privacyPolicyRender && termsOfServiceRender && (
-          <div className="border-r-[1px] border-gray-300" />
-        )}
-        {termsOfServiceRender}
-      </div>
-    </div>
+            {localize('com_auth_sign_up')}
+          </a>
+        </p>
+      )}
+    </>
   );
 }
 

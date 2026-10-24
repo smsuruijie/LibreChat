@@ -1,5 +1,5 @@
+const { getModelMaxTokens } = require('@librechat/api');
 const BaseClient = require('../BaseClient');
-const { getModelMaxTokens } = require('../../../utils');
 
 class FakeClient extends BaseClient {
   constructor(apiKey, options = {}) {
@@ -40,7 +40,8 @@ class FakeClient extends BaseClient {
       };
     }
 
-    this.maxContextTokens = getModelMaxTokens(this.modelOptions.model) ?? 4097;
+    this.maxContextTokens =
+      this.options.maxContextTokens ?? getModelMaxTokens(this.modelOptions.model) ?? 4097;
   }
   buildMessages() {}
   getTokenCount(str) {
@@ -55,7 +56,6 @@ const initializeFakeClient = (apiKey, options, fakeMessages) => {
   let TestClient = new FakeClient(apiKey);
   TestClient.options = options;
   TestClient.abortController = { abort: jest.fn() };
-  TestClient.saveMessageToDatabase = jest.fn();
   TestClient.loadHistory = jest
     .fn()
     .mockImplementation((conversationId, parentMessageId = null) => {
@@ -82,10 +82,12 @@ const initializeFakeClient = (apiKey, options, fakeMessages) => {
   });
 
   TestClient.sendCompletion = jest.fn(async () => {
-    return 'Mock response text';
+    return {
+      completion: 'Mock response text',
+      metadata: undefined,
+    };
   });
 
-  // eslint-disable-next-line no-unused-vars
   TestClient.getCompletion = jest.fn().mockImplementation(async (..._args) => {
     return {
       choices: [
@@ -106,7 +108,7 @@ const initializeFakeClient = (apiKey, options, fakeMessages) => {
     const formattedMessages = orderedMessages.map((message) => {
       let { role: _role, sender, text } = message;
       const role = _role ?? sender;
-      const content = text ?? '';
+      const content = Array.isArray(message.content) ? message.content : (text ?? '');
       return {
         role: role?.toLowerCase() === 'user' ? 'user' : 'assistant',
         content,

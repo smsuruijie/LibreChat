@@ -1,90 +1,137 @@
-import React, { useState, useEffect } from 'react';
-import { LazyLoadImage } from 'react-lazy-load-image-component';
-import * as Dialog from '@radix-ui/react-dialog';
+import React, { useState, useRef, useMemo, useEffect } from 'react';
+import { Skeleton } from '@librechat/client';
+import { apiBaseUrl } from 'librechat-data-provider';
+import { cn, toAbsoluteFilePath } from '~/utils';
 import DialogImage from './DialogImage';
-import { cn } from '~/utils';
+
+/** Max display height for chat images (Tailwind JIT class) */
+export const IMAGE_MAX_H = 'max-h-[45vh]' as const;
+/** Matches the `max-w-lg` Tailwind class on the wrapper button (32rem = 512px at 16px base) */
+const IMAGE_MAX_W_PX = 512;
+
+/** Caches image dimensions by src so remounts can reserve space */
+const dimensionCache = new Map<string, { width: number; height: number }>();
+/** Tracks URLs that have been fully painted — skip skeleton on remount */
+const paintedUrls = new Set<string>();
+
+/** Test-only: resets module-level caches */
+export function _resetImageCaches(): void {
+  dimensionCache.clear();
+  paintedUrls.clear();
+}
+
+function computeHeightStyle(w: number, h: number): React.CSSProperties {
+  return { height: `min(45vh, ${(h / w) * 100}vw, ${(h / w) * IMAGE_MAX_W_PX}px)` };
+}
 
 const Image = ({
   imagePath,
   altText,
-  height,
+  className,
+  alignRight = false,
+  args,
   width,
-  placeholderDimensions,
-}: // n,
-// i,
-{
+  height,
+}: {
   imagePath: string;
   altText: string;
-  height: number;
-  width: number;
-  placeholderDimensions?: {
-    height: string;
-    width: string;
+  className?: string;
+  alignRight?: boolean;
+  args?: {
+    prompt?: string;
+    quality?: 'low' | 'medium' | 'high';
+    size?: string;
+    style?: string;
+    [key: string]: unknown;
   };
-  // n: number;
-  // i: number;
+  width?: number;
+  height?: number;
 }) => {
-  const [isLoaded, setIsLoaded] = useState(false);
-  const handleImageLoad = () => setIsLoaded(true);
-  const [minDisplayTimeElapsed, setMinDisplayTimeElapsed] = useState(false);
+  const [isOpen, setIsOpen] = useState(false);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+
+  /** Root-relative server paths (`/images/...` static, `/api/...` downloads and
+   *  share routes) are resolved against the API base so they load under a
+   *  subpath deployment. */
+  const absoluteImageUrl = useMemo(() => toAbsoluteFilePath(imagePath, apiBaseUrl()), [imagePath]);
+
+  const downloadImage = async () => {
+    try {
+      const response = await fetch(absoluteImageUrl);
+      if (!response.ok) {
+        throw new Error(`Failed to fetch image: ${response.status}`);
+      }
+
+      const blob = await response.blob();
+      const url = window.URL.createObjectURL(blob);
+
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = altText || 'image.png';
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+
+      window.URL.revokeObjectURL(url);
+    } catch (error) {
+      console.error('Download failed:', error);
+      const link = document.createElement('a');
+      link.href = absoluteImageUrl;
+      link.download = altText || 'image.png';
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+    }
+  };
 
   useEffect(() => {
-    let timer: NodeJS.Timeout;
-    if (isLoaded) {
-      timer = setTimeout(() => setMinDisplayTimeElapsed(true), 150);
+    if (width && height && absoluteImageUrl) {
+      dimensionCache.set(absoluteImageUrl, { width, height });
     }
-    return () => clearTimeout(timer);
-  }, [isLoaded]);
-  // const makeSquare = n >= 3 && i < 2;
+  }, [absoluteImageUrl, width, height]);
 
-  let placeholderHeight = '288px';
-  if (placeholderDimensions?.height && placeholderDimensions?.width) {
-    placeholderHeight = placeholderDimensions.height;
-  } else if (height > width) {
-    placeholderHeight = '900px';
-  } else if (height === width) {
-    placeholderHeight = width + 'px';
-  }
+  const dims = width && height ? { width, height } : dimensionCache.get(absoluteImageUrl);
+  const hasDimensions = !!(dims?.width && dims?.height);
+  const heightStyle = hasDimensions ? computeHeightStyle(dims.width, dims.height) : undefined;
+  const showSkeleton = hasDimensions && !paintedUrls.has(absoluteImageUrl);
 
   return (
-    <Dialog.Root>
-      <div className="">
-        <div className="relative mt-1 flex h-auto w-full max-w-lg items-center justify-center overflow-hidden bg-gray-200 text-gray-500 dark:bg-gray-700 dark:text-gray-400">
-          <Dialog.Trigger asChild>
-            <button type="button" aria-haspopup="dialog" aria-expanded="false">
-              <LazyLoadImage
-                // loading="lazy"
-                alt={altText}
-                onLoad={handleImageLoad}
-                visibleByDefault={true}
-                className={cn(
-                  'max-h-[900px] max-w-full opacity-100 transition-opacity duration-300',
-                  // n >= 3 && i < 2 ? 'aspect-square object-cover' : '',
-                  isLoaded && minDisplayTimeElapsed ? 'opacity-100' : 'opacity-0',
-                )}
-                src={imagePath}
-                style={{
-                  height: isLoaded && minDisplayTimeElapsed ? 'auto' : placeholderHeight,
-                  width: placeholderDimensions?.width ?? width,
-                  color: 'transparent',
-                }}
-                placeholder={
-                  <div
-                    style={{
-                      height: isLoaded && minDisplayTimeElapsed ? 'auto' : placeholderHeight,
-                      width: placeholderDimensions?.width ?? width,
-                    }}
-                  />
-                }
-              />
-            </button>
-          </Dialog.Trigger>
-        </div>
-      </div>
-      {isLoaded && minDisplayTimeElapsed && (
-        <DialogImage src={imagePath} height={height} width={width} />
-      )}
-    </Dialog.Root>
+    <div className={alignRight ? 'ms-auto' : undefined}>
+      <button
+        ref={triggerRef}
+        type="button"
+        aria-label={`View ${altText} in dialog`}
+        aria-haspopup="dialog"
+        onClick={() => setIsOpen(true)}
+        className={cn(
+          'border-border-light text-text-secondary-alt relative mt-1 w-full max-w-lg cursor-pointer overflow-hidden rounded-lg border shadow-md transition-shadow',
+          'focus-visible:ring-text-primary focus-visible:ring-offset-surface-primary focus:outline-hidden focus-visible:ring-2 focus-visible:ring-offset-2',
+          className,
+        )}
+        style={heightStyle}
+      >
+        {showSkeleton && <Skeleton className="absolute inset-0" aria-hidden="true" />}
+        <img
+          alt={altText}
+          src={absoluteImageUrl}
+          onLoad={() => paintedUrls.add(absoluteImageUrl)}
+          className={cn(
+            'relative block text-transparent',
+            hasDimensions
+              ? 'size-full object-contain'
+              : cn('h-auto w-auto max-w-full', IMAGE_MAX_H),
+          )}
+        />
+      </button>
+      <DialogImage
+        isOpen={isOpen}
+        onOpenChange={setIsOpen}
+        src={absoluteImageUrl}
+        downloadImage={downloadImage}
+        args={args}
+        triggerRef={triggerRef}
+      />
+    </div>
   );
 };
 

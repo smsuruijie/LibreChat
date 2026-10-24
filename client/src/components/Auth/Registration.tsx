@@ -1,265 +1,264 @@
+import React, { useContext, useState } from 'react';
 import { useForm } from 'react-hook-form';
-import { useNavigate } from 'react-router-dom';
-import React, { useState, useEffect } from 'react';
-import { useRegisterUserMutation, useGetStartupConfig } from 'librechat-data-provider/react-query';
-import type { TRegisterUser } from 'librechat-data-provider';
-import { GoogleIcon, FacebookIcon, OpenIDIcon, GithubIcon, DiscordIcon } from '~/components';
-import { ThemeSelector } from '~/components/ui';
-import SocialButton from './SocialButton';
-import { useLocalize } from '~/hooks';
+import { loginPage } from 'librechat-data-provider';
+import { Turnstile } from '@marsidev/react-turnstile';
+import { useNavigate, useOutletContext, useLocation } from 'react-router-dom';
+import { useRegisterUserMutation } from 'librechat-data-provider/react-query';
+import {
+  ThemeContext,
+  SecretInput,
+  Spinner,
+  Button,
+  Input,
+  isDark,
+  floatingLabel,
+} from '@librechat/client';
+import type { TRegisterUser, TError } from 'librechat-data-provider';
+import type { TLoginLayoutContext } from '~/common';
+import { useLocalize, TranslationKeys } from '~/hooks';
+import { ErrorMessage } from './ErrorMessage';
+import LegalConsent from './LegalConsent';
 
 const Registration: React.FC = () => {
   const navigate = useNavigate();
-  const { data: startupConfig } = useGetStartupConfig();
   const localize = useLocalize();
+  const { theme } = useContext(ThemeContext);
+  const { startupConfig, startupConfigError, isFetching } = useOutletContext<TLoginLayoutContext>();
 
   const {
-    register,
     watch,
+    register,
     handleSubmit,
     formState: { errors },
   } = useForm<TRegisterUser>({ mode: 'onChange' });
-
-  const [error, setError] = useState<boolean>(false);
-  const [errorMessage, setErrorMessage] = useState<string>('');
-  const registerUser = useRegisterUserMutation();
   const password = watch('password');
 
-  const onRegisterUserFormSubmit = async (data: TRegisterUser) => {
-    try {
-      await registerUser.mutateAsync(data);
-      navigate('/c/new');
-    } catch (error) {
-      setError(true);
-      //@ts-ignore - error is of type unknown
-      if (error.response?.data?.message) {
-        //@ts-ignore - error is of type unknown
-        setErrorMessage(error.response?.data?.message);
+  const [errorMessage, setErrorMessage] = useState<string>('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [countdown, setCountdown] = useState<number>(3);
+  const [turnstileToken, setTurnstileToken] = useState<string | null>(null);
+
+  const location = useLocation();
+  const queryParams = new URLSearchParams(location.search);
+  const token = queryParams.get('token');
+  const validTheme = isDark(theme) ? 'dark' : 'light';
+
+  // only require captcha if we have a siteKey
+  const requireCaptcha = Boolean(startupConfig?.turnstile?.siteKey);
+
+  const registerUser = useRegisterUserMutation({
+    onMutate: () => {
+      setIsSubmitting(true);
+    },
+    onSuccess: () => {
+      setIsSubmitting(false);
+      setCountdown(3);
+      const timer = setInterval(() => {
+        setCountdown((prevCountdown) => {
+          if (prevCountdown <= 1) {
+            clearInterval(timer);
+            navigate('/c/new', { replace: true });
+            return 0;
+          } else {
+            return prevCountdown - 1;
+          }
+        });
+      }, 1000);
+    },
+    onError: (error: unknown) => {
+      setIsSubmitting(false);
+      if ((error as TError).response?.data?.message) {
+        setErrorMessage((error as TError).response?.data?.message ?? '');
       }
-    }
-  };
+    },
+  });
 
-  useEffect(() => {
-    if (startupConfig?.registrationEnabled === false) {
-      navigate('/login');
-    }
-  }, [startupConfig, navigate]);
+  const renderInput = (id: string, label: TranslationKeys, type: string, validation: object) => {
+    const fieldLabel = localize(label);
+    const field = register(
+      id as 'name' | 'email' | 'username' | 'password' | 'confirm_password',
+      validation,
+    );
 
-  if (!startupConfig) {
-    return null;
-  }
-
-  const socialLogins = startupConfig.socialLogins ?? [];
-
-  const renderInput = (id: string, label: string, type: string, validation: object) => (
-    <div className="mb-2">
-      <div className="relative">
-        <input
-          id={id}
-          type={type}
-          autoComplete={id}
-          aria-label={localize(label)}
-          {...register(
-            id as 'name' | 'email' | 'username' | 'password' | 'confirm_password',
-            validation,
-          )}
-          aria-invalid={!!errors[id]}
-          className="webkit-dark-styles peer block w-full appearance-none rounded-md border border-black/10 bg-white px-2.5 pb-2.5 pt-5 text-sm text-gray-800 focus:border-green-500 focus:outline-none dark:border-white/20 dark:bg-gray-900 dark:text-white dark:focus:border-green-500"
-          placeholder=" "
-          data-testid={id}
-        ></input>
-        <label
-          htmlFor={id}
-          className="pointer-events-none absolute left-2.5 top-4 z-10 origin-[0] -translate-y-4 scale-75 transform text-sm text-gray-500 duration-100 peer-placeholder-shown:translate-y-0 peer-placeholder-shown:scale-100 peer-focus:-translate-y-4 peer-focus:scale-75 peer-focus:text-green-500 dark:text-gray-200"
-        >
-          {localize(label)}
-        </label>
-      </div>
-      {errors[id] && (
-        <span role="alert" className="mt-1 text-sm text-black dark:text-white">
-          {String(errors[id]?.message) ?? ''}
-        </span>
-      )}
-    </div>
-  );
-
-  const providerComponents = {
-    discord: (
-      <SocialButton
-        key="discord"
-        enabled={startupConfig.discordLoginEnabled}
-        serverDomain={startupConfig.serverDomain}
-        oauthPath="discord"
-        Icon={DiscordIcon}
-        label={localize('com_auth_discord_login')}
-        id="discord"
-      />
-    ),
-    facebook: (
-      <SocialButton
-        key="facebook"
-        enabled={startupConfig.facebookLoginEnabled}
-        serverDomain={startupConfig.serverDomain}
-        oauthPath="facebook"
-        Icon={FacebookIcon}
-        label={localize('com_auth_facebook_login')}
-        id="facebook"
-      />
-    ),
-    github: (
-      <SocialButton
-        key="github"
-        enabled={startupConfig.githubLoginEnabled}
-        serverDomain={startupConfig.serverDomain}
-        oauthPath="github"
-        Icon={GithubIcon}
-        label={localize('com_auth_github_login')}
-        id="github"
-      />
-    ),
-    google: (
-      <SocialButton
-        key="google"
-        enabled={startupConfig.googleLoginEnabled}
-        serverDomain={startupConfig.serverDomain}
-        oauthPath="google"
-        Icon={GoogleIcon}
-        label={localize('com_auth_google_login')}
-        id="google"
-      />
-    ),
-    openid: (
-      <SocialButton
-        key="openid"
-        enabled={startupConfig.openidLoginEnabled}
-        serverDomain={startupConfig.serverDomain}
-        oauthPath="openid"
-        Icon={() =>
-          startupConfig.openidImageUrl ? (
-            <img src={startupConfig.openidImageUrl} alt="OpenID Logo" className="h-5 w-5" />
+    return (
+      <div className="mb-4">
+        <div className="relative">
+          {type === 'password' ? (
+            <SecretInput
+              colorTransition
+              id={id}
+              autoComplete={id}
+              aria-label={fieldLabel}
+              {...field}
+              aria-invalid={!!errors[id]}
+              variant="floating"
+              placeholder=" "
+              data-testid={id}
+              label={fieldLabel}
+            />
           ) : (
-            <OpenIDIcon />
-          )
-        }
-        label={startupConfig.openidLabel}
-        id="openid"
-      />
-    ),
+            <>
+              <Input
+                colorTransition
+                id={id}
+                type={type}
+                autoComplete={id}
+                aria-label={fieldLabel}
+                {...field}
+                aria-invalid={!!errors[id]}
+                variant="floating"
+                placeholder=" "
+                data-testid={id}
+              />
+              <label htmlFor={id} className={floatingLabel}>
+                {fieldLabel}
+              </label>
+            </>
+          )}
+        </div>
+        {errors[id] && (
+          <span role="alert" className="text-text-destructive mt-1 text-sm">
+            {String(errors[id]?.message) ?? ''}
+          </span>
+        )}
+      </div>
+    );
   };
 
   return (
-    <div className="flex min-h-screen flex-col items-center justify-center bg-white pt-6 dark:bg-gray-900 sm:pt-0">
-      <div className="absolute bottom-0 left-0 m-4">
-        <ThemeSelector />
-      </div>
-      <div className="mt-6 w-authPageWidth overflow-hidden bg-white px-6 py-4 dark:bg-gray-900 sm:max-w-md sm:rounded-lg">
-        <h1
-          className="mb-4 text-center text-3xl font-semibold text-black dark:text-white"
-          style={{ userSelect: 'none' }}
+    <>
+      {errorMessage && (
+        <ErrorMessage>
+          {localize('com_auth_error_create')} {errorMessage}
+        </ErrorMessage>
+      )}
+      {registerUser.isSuccess && countdown > 0 && (
+        <div
+          className="border-status-success-border bg-status-success-subtle text-text-secondary rounded-md border px-3 py-2 text-sm"
+          role="alert"
         >
-          {localize('com_auth_create_account')}
-        </h1>
-        {error && (
-          <div
-            className="rounded-md border border-red-500 bg-red-500/10 px-3 py-2 text-sm text-gray-600 dark:text-gray-200"
-            role="alert"
-            data-testid="registration-error"
-          >
-            {localize('com_auth_error_create')} {errorMessage}
-          </div>
-        )}
-        <form
-          className="mt-6"
-          aria-label="Registration form"
-          method="POST"
-          onSubmit={handleSubmit(onRegisterUserFormSubmit)}
-        >
-          {renderInput('name', 'com_auth_full_name', 'text', {
-            required: localize('com_auth_name_required'),
-            minLength: {
-              value: 3,
-              message: localize('com_auth_name_min_length'),
-            },
-            maxLength: {
-              value: 80,
-              message: localize('com_auth_name_max_length'),
-            },
-          })}
-          {renderInput('username', 'com_auth_username', 'text', {
-            minLength: {
-              value: 2,
-              message: localize('com_auth_username_min_length'),
-            },
-            maxLength: {
-              value: 80,
-              message: localize('com_auth_username_max_length'),
-            },
-          })}
-          {renderInput('email', 'com_auth_email', 'email', {
-            required: localize('com_auth_email_required'),
-            minLength: {
-              value: 1,
-              message: localize('com_auth_email_min_length'),
-            },
-            maxLength: {
-              value: 120,
-              message: localize('com_auth_email_max_length'),
-            },
-            pattern: {
-              value: /\S+@\S+\.\S+/,
-              message: localize('com_auth_email_pattern'),
-            },
-          })}
-          {renderInput('password', 'com_auth_password', 'password', {
-            required: localize('com_auth_password_required'),
-            minLength: {
-              value: 8,
-              message: localize('com_auth_password_min_length'),
-            },
-            maxLength: {
-              value: 128,
-              message: localize('com_auth_password_max_length'),
-            },
-          })}
-          {renderInput('confirm_password', 'com_auth_password_confirm', 'password', {
-            validate: (value) => value === password || localize('com_auth_password_not_match'),
-          })}
-          <div className="mt-6">
-            <button
-              disabled={Object.keys(errors).length > 0}
-              type="submit"
-              aria-label="Submit registration"
-              className="w-full transform rounded-md bg-green-500 px-4 py-3 tracking-wide text-white transition-colors duration-200 hover:bg-green-550 focus:bg-green-550 focus:outline-none disabled:cursor-not-allowed disabled:hover:bg-green-500"
-            >
-              {localize('com_auth_continue')}
-            </button>
-          </div>
-        </form>
-        <p className="my-4 text-center text-sm font-light text-gray-700 dark:text-white">
-          {localize('com_auth_already_have_account')}{' '}
-          <a href="/login" aria-label="Login" className="p-1 font-medium text-green-500">
-            {localize('com_auth_login')}
-          </a>
-        </p>
-        {startupConfig.socialLoginEnabled && (
-          <>
-            {startupConfig.emailLoginEnabled && (
-              <>
-                <div className="relative mt-6 flex w-full items-center justify-center border border-t uppercase">
-                  <div className="absolute bg-white px-3 text-xs text-black dark:bg-gray-900 dark:text-white">
-                    Or
-                  </div>
-                </div>
-                <div className="mt-8" />
-              </>
+          {localize(
+            startupConfig?.emailEnabled
+              ? 'com_auth_registration_success_generic'
+              : 'com_auth_registration_success_insecure',
+          ) +
+            ' ' +
+            localize('com_auth_email_verification_redirecting', { 0: countdown.toString() })}
+        </div>
+      )}
+      {!startupConfigError && !isFetching && (
+        <>
+          <form
+            className="mt-6"
+            aria-label="Registration form"
+            method="POST"
+            onSubmit={handleSubmit((data: TRegisterUser) =>
+              registerUser.mutate({ ...data, token: token ?? undefined }),
             )}
-            <div className="mt-2">
-              {socialLogins.map((provider) => providerComponents[provider] || null)}
+          >
+            {renderInput('name', 'com_auth_full_name', 'text', {
+              required: localize('com_auth_name_required'),
+              minLength: {
+                value: 3,
+                message: localize('com_auth_name_min_length'),
+              },
+              maxLength: {
+                value: 80,
+                message: localize('com_auth_name_max_length'),
+              },
+            })}
+            {renderInput('username', 'com_auth_username', 'text', {
+              minLength: {
+                value: 2,
+                message: localize('com_auth_username_min_length'),
+              },
+              maxLength: {
+                value: 80,
+                message: localize('com_auth_username_max_length'),
+              },
+            })}
+            {renderInput('email', 'com_auth_email', 'email', {
+              required: localize('com_auth_email_required'),
+              minLength: {
+                value: 1,
+                message: localize('com_auth_email_min_length'),
+              },
+              maxLength: {
+                value: 120,
+                message: localize('com_auth_email_max_length'),
+              },
+              pattern: {
+                value: /\S+@\S+\.\S+/,
+                message: localize('com_auth_email_pattern'),
+              },
+            })}
+            {renderInput('password', 'com_auth_password', 'password', {
+              required: localize('com_auth_password_required'),
+              minLength: {
+                value: startupConfig?.minPasswordLength || 8,
+                message: localize('com_auth_password_min_length'),
+              },
+              maxLength: {
+                value: 128,
+                message: localize('com_auth_password_max_length'),
+              },
+            })}
+            {renderInput('confirm_password', 'com_auth_password_confirm', 'password', {
+              validate: (value: string) =>
+                value === password || localize('com_auth_password_not_match'),
+            })}
+
+            {startupConfig?.turnstile?.siteKey && (
+              <div className="my-4 flex justify-center">
+                <Turnstile
+                  siteKey={startupConfig.turnstile.siteKey}
+                  options={{
+                    ...startupConfig.turnstile.options,
+                    theme: validTheme,
+                  }}
+                  onSuccess={(token) => setTurnstileToken(token)}
+                  onError={() => setTurnstileToken(null)}
+                  onExpire={() => setTurnstileToken(null)}
+                />
+              </div>
+            )}
+
+            <div className="mt-6">
+              <Button
+                disabled={
+                  Object.keys(errors).length > 0 ||
+                  isSubmitting ||
+                  (requireCaptcha && !turnstileToken)
+                }
+                type="submit"
+                aria-label="Submit registration"
+                variant="submit"
+                shape="soft"
+                size="auth"
+                className="w-full"
+              >
+                {isSubmitting ? <Spinner /> : localize('com_auth_continue')}
+              </Button>
             </div>
-          </>
-        )}
-      </div>
-    </div>
+
+            {/* Under the button it is agreed to, and read before the account is
+                created; the auth layout drops its footer bar in exchange. */}
+            <LegalConsent startupConfig={startupConfig} />
+          </form>
+
+          <p className="text-text-secondary my-4 text-center text-sm font-light">
+            {localize('com_auth_already_have_account')}{' '}
+            <a
+              href={loginPage()}
+              aria-label="Login"
+              className="text-accent-primary hover:text-accent-primary-hover inline-flex p-1 text-sm font-medium transition-colors"
+            >
+              {localize('com_auth_login')}
+            </a>
+          </p>
+        </>
+      )}
+    </>
   );
 };
 

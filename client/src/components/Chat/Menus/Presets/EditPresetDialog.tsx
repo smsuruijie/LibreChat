@@ -1,24 +1,43 @@
+import { useCallback, useEffect, useMemo } from 'react';
 import { useRecoilState } from 'recoil';
-import { useGetEndpointsQuery } from 'librechat-data-provider/react-query';
-import { cn, defaultTextProps, removeFocusOutlines, mapEndpoints } from '~/utils';
-import { Input, Label, Dropdown, Dialog, DialogClose, DialogButton } from '~/components/';
-import PopoverButtons from '~/components/Chat/Input/PopoverButtons';
-import DialogTemplate from '~/components/ui/DialogTemplate';
+import { useQueryClient } from '@tanstack/react-query';
+import {
+  QueryKeys,
+  alternateName,
+  isAgentsEndpoint,
+  resolveModelCatalogKey,
+} from 'librechat-data-provider';
+import {
+  Input,
+  Label,
+  Button,
+  OGDialog,
+  OGDialogTitle,
+  ControlCombobox,
+  OGDialogContent,
+} from '@librechat/client';
+import type { TModelsConfig, TEndpointsConfig } from 'librechat-data-provider';
 import { useSetIndexOptions, useLocalize, useDebouncedInput } from '~/hooks';
+import PopoverButtons from '~/components/Chat/Input/PopoverButtons';
+import { mapEndpoints, getConvoSwitchLogic } from '~/utils';
 import { EndpointSettings } from '~/components/Endpoints';
+import { useGetEndpointsQuery } from '~/data-provider';
 import { useChatContext } from '~/Providers';
 import store from '~/store';
 
 const EditPresetDialog = ({
   exportPreset,
   submitPreset,
+  triggerRef,
 }: {
   exportPreset: () => void;
   submitPreset: () => void;
+  triggerRef?: React.RefObject<HTMLDivElement>;
 }) => {
   const localize = useLocalize();
+  const queryClient = useQueryClient();
   const { preset, setPreset } = useChatContext();
-  const { setOption } = useSetIndexOptions(preset);
+  const { setOption, setOptions } = useSetIndexOptions(preset);
   const [onTitleChange, title] = useDebouncedInput({
     setOption,
     optionKey: 'title',
@@ -26,106 +45,187 @@ const EditPresetDialog = ({
   });
   const [presetModalVisible, setPresetModalVisible] = useRecoilState(store.presetModalVisible);
 
-  const { data: availableEndpoints = [] } = useGetEndpointsQuery({
+  const { data: _endpoints = [] } = useGetEndpointsQuery({
     select: mapEndpoints,
   });
 
-  const { endpoint } = preset || {};
+  const availableEndpoints = useMemo(() => {
+    return _endpoints.filter((endpoint) => !isAgentsEndpoint(endpoint));
+  }, [_endpoints]);
+
+  const endpointItems = useMemo(
+    () =>
+      availableEndpoints.map((value) => ({
+        value,
+        label: alternateName[value] ?? value,
+      })),
+    [availableEndpoints],
+  );
+
+  useEffect(() => {
+    if (!preset) {
+      return;
+    }
+
+    if (isAgentsEndpoint(preset.endpoint)) {
+      return;
+    }
+
+    const presetEndpoint = preset.endpoint ?? '';
+
+    if (!presetEndpoint) {
+      return;
+    }
+
+    const modelsConfig = queryClient.getQueryData<TModelsConfig>([QueryKeys.models]);
+    if (!modelsConfig) {
+      return;
+    }
+
+    const models = modelsConfig[resolveModelCatalogKey(presetEndpoint, modelsConfig)] as
+      | string[]
+      | undefined;
+    if (!models) {
+      return;
+    }
+    if (!models.length) {
+      return;
+    }
+
+    if (preset.model === models[0]) {
+      return;
+    }
+
+    if (!models.includes(preset.model ?? '')) {
+      console.log('setting model', models[0]);
+      setOption('model')(models[0]);
+    }
+  }, [preset, queryClient, setOption]);
+
+  const switchEndpoint = useCallback(
+    (newEndpoint: string) => {
+      if (!setOptions) {
+        return console.warn('setOptions is not defined');
+      }
+
+      const { newEndpointType } = getConvoSwitchLogic({
+        newEndpoint,
+        modularChat: true,
+        conversation: null,
+        endpointsConfig: queryClient.getQueryData<TEndpointsConfig>([QueryKeys.endpoints]) ?? {},
+      });
+
+      setOptions({
+        endpoint: newEndpoint,
+        endpointType: newEndpointType,
+      });
+    },
+    [queryClient, setOptions],
+  );
+
+  const handleOpenChange = (open: boolean) => {
+    setPresetModalVisible(open);
+    if (!open) {
+      setPreset(null);
+    }
+  };
+
+  const { endpoint: _endpoint, endpointType, model } = preset || {};
+  const endpoint = _endpoint ?? '';
+
   if (!endpoint) {
     return null;
   }
 
+  if (isAgentsEndpoint(endpoint)) {
+    return null;
+  }
+
   return (
-    <Dialog
-      open={presetModalVisible}
-      onOpenChange={(open) => {
-        setPresetModalVisible(open);
-        if (!open) {
-          setPreset(null);
-        }
-      }}
-    >
-      <DialogTemplate
-        title={`${localize('com_ui_edit') + ' ' + localize('com_endpoint_preset')} - ${
-          preset?.title
-        }`}
-        className="h-full max-w-full overflow-y-auto pb-4 sm:w-[680px] sm:pb-0 md:h-[720px] md:w-[750px] md:overflow-y-hidden lg:w-[950px] xl:h-[720px]"
-        main={
-          <div className="flex w-full flex-col items-center gap-2 md:h-[530px]">
-            <div className="grid w-full">
-              <div className="col-span-4 flex items-start md:flex-row justify-start flex-col gap-6 pb-4">
-                <div className="flex w-full flex-col">
-                  <Label htmlFor="preset-name" className="mb-1 text-left text-sm font-medium">
-                    {localize('com_endpoint_preset_name')}
-                  </Label>
-                  <Input
-                    id="preset-name"
-                    value={(title as string | undefined) ?? ''}
-                    onChange={onTitleChange}
-                    placeholder={localize('com_endpoint_set_custom_name')}
-                    className={cn(
-                      defaultTextProps,
-                      'flex h-10 max-h-10 w-full resize-none px-3 py-2',
-                      removeFocusOutlines,
-                    )}
-                  />
-                </div>
-                <div className="flex w-full flex-col">
-                  <Label htmlFor="endpoint" className="mb-1 text-left text-sm font-medium">
-                    {localize('com_endpoint')}
-                  </Label>
-                  <Dropdown
-                    value={endpoint || ''}
-                    onChange={(value) => setOption('endpoint')(value)}
-                    options={availableEndpoints}
-                  />
-                </div>
-              </div>
-              <div className="col-span-2 flex items-start justify-start gap-4 sm:col-span-1">
-                <div className="flex w-full flex-col">
-                  <Label
-                    htmlFor="endpoint"
-                    className="mb-1 hidden text-left text-sm font-medium sm:block"
-                  >
-                    {'ㅤ'}
-                  </Label>
-                  <PopoverButtons
-                    buttonClass="ml-0 w-full dark:bg-gray-700 dark:hover:bg-gray-800 p-2 h-[40px] justify-center mt-0"
-                    iconClass="hidden lg:block w-4"
-                  />
-                </div>
-              </div>
-            </div>
-            <div className="my-4 w-full border-t border-gray-300 dark:border-gray-700" />
-            <div className="w-full p-0">
-              <EndpointSettings
-                conversation={preset}
-                setOption={setOption}
-                isPreset={true}
-                isMultiChat={true}
-                className="h-full md:mb-4 md:h-[440px]"
-              />
-            </div>
+    <OGDialog open={presetModalVisible} onOpenChange={handleOpenChange} triggerRef={triggerRef}>
+      <OGDialogContent className="md:rounded-theme-surface flex h-[100dvh] max-h-[100dvh] w-full max-w-full flex-col overflow-y-visible md:h-auto md:max-h-[90vh] md:max-w-[75vw] lg:max-w-[59.375rem]">
+        <OGDialogTitle className="shrink-0">
+          {localize('com_ui_edit_preset_title', { title: preset?.title })}
+        </OGDialogTitle>
+
+        {/* Pinned above the scroller, and the dialog itself is overflow-visible:
+            ControlCombobox renders its popover in place (portal={false} for the
+            dialog's focus trap), so no ancestor may clip it. The flex column
+            still bounds the dialog because the settings region below owns the
+            only scroll. */}
+        <div className="grid w-full shrink-0 gap-3 md:grid-cols-2 md:gap-4">
+          <div className="flex w-full flex-col">
+            <Label htmlFor="preset-name" variant="section">
+              {localize('com_endpoint_preset_name')}
+            </Label>
+            <Input
+              id="preset-name"
+              value={(title as string | undefined) ?? ''}
+              onChange={onTitleChange}
+              placeholder={localize('com_endpoint_set_custom_name')}
+              className="rounded-theme-control h-9 w-full"
+            />
           </div>
-        }
-        buttons={
-          <div className="mb-6 md:mb-2">
-            <DialogButton
-              onClick={exportPreset}
-              className="border-gray-100 hover:bg-gray-100 dark:border-gray-700 dark:hover:bg-gray-600"
-            >
-              {localize('com_endpoint_export')}
-            </DialogButton>
-            <DialogClose
-              onClick={submitPreset}
-              className="ml-2 bg-green-500 text-white hover:bg-green-600 dark:hover:bg-green-600"
-            >
-              {localize('com_ui_save')}
-            </DialogClose>
+          <div className="flex w-full flex-col">
+            <Label htmlFor="endpoint" variant="section">
+              {localize('com_endpoint')}
+            </Label>
+            <ControlCombobox
+              selectedValue={endpoint || ''}
+              displayValue={alternateName[endpoint ?? ''] ?? endpoint ?? ''}
+              items={endpointItems}
+              setValue={switchEndpoint}
+              ariaLabel={localize('com_endpoint')}
+              searchPlaceholder={localize('com_endpoint_search')}
+              selectPlaceholder={localize('com_endpoint')}
+              isCollapsed={false}
+              showCarat={true}
+              /** The dialog traps focus and clips a portaled popover */
+              portal={false}
+            />
           </div>
-        }
-      />
-    </Dialog>
+        </div>
+
+        {/* Only this region scrolls, so the title, the fields above and the actions stay put */}
+        <div className="flex min-h-0 w-full flex-1 flex-col gap-3 overflow-y-auto px-1 md:gap-4">
+          {/* PopoverButtons section */}
+          <div className="flex w-full">
+            <PopoverButtons
+              buttonClass="ms-0 w-full border border-border-medium p-2 h-[2.5rem] justify-center mt-0"
+              iconClass="hidden lg:block w-4"
+              endpoint={endpoint}
+              endpointType={endpointType}
+              model={model}
+            />
+          </div>
+
+          {/* Separator */}
+          <div className="border-border-medium w-full border-t" />
+
+          {/* Settings section. The shared component ships a fixed-height scroll
+              box; overriding it to auto lets the dialog own the single scroll
+              rather than nesting one inside another. */}
+          <div className="w-full">
+            <EndpointSettings
+              conversation={preset}
+              setOption={setOption}
+              isPreset={true}
+              className="text-text-primary h-auto overflow-visible md:h-auto"
+            />
+          </div>
+        </div>
+
+        {/* Action buttons */}
+        <div className="border-border-medium flex shrink-0 justify-end gap-2 border-t pt-3">
+          <Button variant="outline" onClick={exportPreset}>
+            {localize('com_endpoint_export')}
+          </Button>
+          <Button variant="submit" onClick={submitPreset}>
+            {localize('com_ui_save')}
+          </Button>
+        </div>
+      </OGDialogContent>
+    </OGDialog>
   );
 };
 

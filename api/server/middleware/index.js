@@ -1,39 +1,77 @@
-const abortMiddleware = require('./abortMiddleware');
-const checkBan = require('./checkBan');
-const uaParser = require('./uaParser');
-const setHeaders = require('./setHeaders');
-const loginLimiter = require('./loginLimiter');
-const validateModel = require('./validateModel');
-const requireJwtAuth = require('./requireJwtAuth');
-const uploadLimiters = require('./uploadLimiters');
-const registerLimiter = require('./registerLimiter');
-const messageLimiters = require('./messageLimiters');
-const requireLocalAuth = require('./requireLocalAuth');
-const validateEndpoint = require('./validateEndpoint');
-const concurrentLimiter = require('./concurrentLimiter');
-const validateMessageReq = require('./validateMessageReq');
-const buildEndpointOption = require('./buildEndpointOption');
+const blockRetiredSetupToken = require('./blockRetiredSetupToken');
+const validatePasswordReset = require('./validatePasswordReset');
+const setTwoFactorTempUser = require('./setTwoFactorTempUser');
+const { setTwoFactorAcknowledgementTempUser, setTwoFactorFinalizationTempUser } =
+  setTwoFactorTempUser;
 const validateRegistration = require('./validateRegistration');
+const buildEndpointOption = require('./buildEndpointOption');
+const validateEmailLogin = require('./validateEmailLogin');
+const validateMessageReq = require('./validateMessageReq');
+const {
+  canReadActiveJobConversation,
+  createMessageRequestValidation,
+  prepareMessageRequestValidation,
+  sendValidationResponse,
+} = require('./messageValidation');
+const checkDomainAllowed = require('./checkDomainAllowed');
+const { markOAuthNavigation } = require('./oauthNavigation');
+const requireSameOrigin = require('./requireSameOrigin');
+const requireLocalAuth = require('./requireLocalAuth');
+const canDeleteAccount = require('./canDeleteAccount');
+const accessResources = require('./accessResources');
+const requireLdapAuth = require('./requireLdapAuth');
+const abortMiddleware = require('./abortMiddleware');
+const checkInviteUser = require('./checkInviteUser');
+const requireJwtAuth = require('./requireJwtAuth');
+const { requireRumProxyAuth, requireTermsAcceptance } = require('./requireJwtAuth');
+const configMiddleware = require('./config/app');
+const { strictConfigMiddleware, loadStreamKeepaliveMs } = require('./config/app');
+const validateModel = require('./validateModel');
 const moderateText = require('./moderateText');
+const logHeaders = require('./logHeaders');
+const setHeaders = require('./setHeaders');
+const validate = require('./validate');
+const limiters = require('./limiters');
+const uaParser = require('./uaParser');
+const checkBan = require('./checkBan');
 const noIndex = require('./noIndex');
 
 module.exports = {
-  ...uploadLimiters,
   ...abortMiddleware,
-  ...messageLimiters,
+  ...validate,
+  ...limiters,
+  ...accessResources,
+  noIndex,
   checkBan,
   uaParser,
   setHeaders,
-  loginLimiter,
+  logHeaders,
+  markOAuthNavigation,
+  moderateText,
+  validateModel,
   requireJwtAuth,
-  registerLimiter,
+  requireRumProxyAuth,
+  requireTermsAcceptance,
+  setTwoFactorTempUser,
+  setTwoFactorAcknowledgementTempUser,
+  setTwoFactorFinalizationTempUser,
+  blockRetiredSetupToken,
+  checkInviteUser,
+  requireLdapAuth,
   requireLocalAuth,
-  validateEndpoint,
-  concurrentLimiter,
+  requireSameOrigin,
+  canDeleteAccount,
+  configMiddleware,
+  strictConfigMiddleware,
+  loadStreamKeepaliveMs,
+  checkDomainAllowed,
   validateMessageReq,
+  canReadActiveJobConversation,
+  sendValidationResponse,
+  createMessageRequestValidation,
+  prepareMessageRequestValidation,
   buildEndpointOption,
   validateRegistration,
-  validateModel,
-  moderateText,
-  noIndex,
+  validatePasswordReset,
+  validateEmailLogin,
 };

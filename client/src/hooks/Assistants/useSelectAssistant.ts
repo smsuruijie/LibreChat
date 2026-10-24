@@ -1,40 +1,39 @@
 import { useCallback } from 'react';
-import { EModelEndpoint, defaultOrderQuery } from 'librechat-data-provider';
-import type { TConversation, TPreset } from 'librechat-data-provider';
-import { useListAssistantsQuery } from '~/data-provider';
+import { isAssistantsEndpoint } from 'librechat-data-provider';
+import type { AssistantsEndpoint, TConversation, TPreset } from 'librechat-data-provider';
+import { mapAssistants, logger, specDisplayFieldReset } from '~/utils';
+import useDefaultConvo from '~/hooks/Conversations/useDefaultConvo';
 import { useChatContext } from '~/Providers/ChatContext';
-import useDefaultConvo from '~/hooks/useDefaultConvo';
-import { mapAssistants } from '~/utils';
+import useAssistantListMap from './useAssistantListMap';
 
-export default function useSelectAssistant() {
+export default function useSelectAssistant(endpoint: AssistantsEndpoint) {
   const getDefaultConversation = useDefaultConvo();
   const { conversation, newConversation } = useChatContext();
-  const { data: assistantMap = {} } = useListAssistantsQuery(defaultOrderQuery, {
-    select: (res) => mapAssistants(res.data),
-  });
+  const assistantMap = useAssistantListMap((res) => mapAssistants(res.data));
 
   const onSelect = useCallback(
     (value: string) => {
-      const assistant = assistantMap?.[value];
+      const assistant = assistantMap[endpoint]?.[value];
       if (!assistant) {
         return;
       }
       const template: Partial<TPreset | TConversation> = {
-        endpoint: EModelEndpoint.assistants,
+        endpoint,
         assistant_id: assistant.id,
         model: assistant.model,
         conversationId: 'new',
+        ...specDisplayFieldReset,
       };
 
-      if (conversation?.endpoint === EModelEndpoint.assistants) {
+      logger.log('conversation', 'Updating conversation with assistant', assistant);
+      if (isAssistantsEndpoint(conversation?.endpoint)) {
         const currentConvo = getDefaultConversation({
-          conversation: { ...(conversation ?? {}) },
+          conversation: { ...(conversation ?? {}), ...specDisplayFieldReset },
           preset: template,
         });
         newConversation({
           template: currentConvo,
           preset: template as Partial<TPreset>,
-          keepLatestMessage: true,
         });
         return;
       }
@@ -44,7 +43,7 @@ export default function useSelectAssistant() {
         preset: template as Partial<TPreset>,
       });
     },
-    [assistantMap, conversation, getDefaultConversation, newConversation],
+    [endpoint, assistantMap, conversation, getDefaultConversation, newConversation],
   );
 
   return { onSelect };

@@ -1,6 +1,4 @@
-version: '3.4'
-
-# Please consult our docs for more info: https://docs.librechat.ai/install/configuration/docker_override.html
+# Please consult our docs for more info: https://www.librechat.ai/docs/configuration/docker_override
 
 # TO USE THIS FILE, FIRST UNCOMMENT THE LINE ('services:')
 
@@ -16,8 +14,10 @@ version: '3.4'
 # services:
 #   api:
 #     volumes:
-#       - ./librechat.yaml:/app/librechat.yaml
-#     image: ghcr.io/danny-avila/librechat:latest
+#     - type: bind
+#       source: ./librechat.yaml
+#       target: /app/librechat.yaml
+#     image: registry.librechat.ai/librechat-ai/librechat:latest
 
 # ---------------------------------------------------
 
@@ -26,7 +26,9 @@ version: '3.4'
 # # USE LIBRECHAT CONFIG FILE
 #   api:
 #     volumes:
-#       - ./librechat.yaml:/app/librechat.yaml
+#     - type: bind
+#       source: ./librechat.yaml
+#       target: /app/librechat.yaml
 
 # # LOCAL BUILD
 #   api:
@@ -37,19 +39,26 @@ version: '3.4'
 
 # # BUILD FROM LATEST IMAGE
 #   api:
-#     image: ghcr.io/danny-avila/librechat-dev:latest
- 
+#     image: registry.librechat.ai/librechat-ai/librechat-dev:latest
+
 # # BUILD FROM LATEST IMAGE (NUMBERED RELEASE)
 #   api:
-#     image: ghcr.io/danny-avila/librechat:latest
+#     image: registry.librechat.ai/librechat-ai/librechat:latest
 
 # # BUILD FROM LATEST API IMAGE
 #   api:
-#     image: ghcr.io/danny-avila/librechat-dev-api:latest
+#     image: registry.librechat.ai/librechat-ai/librechat-dev-api:latest
 
 # # BUILD FROM LATEST API IMAGE (NUMBERED RELEASE)
 #   api:
-#     image: ghcr.io/danny-avila/librechat-api:latest
+#     image: registry.librechat.ai/librechat-ai/librechat-api:latest
+
+# # ADD SAML CERT FILE
+#   api:
+#     volumes:
+#     - type: bind
+#       source: ./your_cert.pem
+#       target: /app/your_cert.pem
 
 # # ADD MONGO-EXPRESS
 #   mongo-express:
@@ -93,6 +102,13 @@ version: '3.4'
 #     ports:
 #       - 7700:7700
 
+# # USE RAG API IMAGE WITH LOCAL EMBEDDINGS SUPPORT
+#  rag_api:
+#    image: registry.librechat.ai/librechat-ai/librechat-rag-api-dev:latest
+# # For Linux user:
+#    extra_hosts:
+#      - "host.docker.internal:host-gateway"
+
 # # ADD OLLAMA
 #  ollama:
 #    image: ollama/ollama:latest
@@ -112,8 +128,13 @@ version: '3.4'
 #    image: ghcr.io/berriai/litellm:main-latest
 #    volumes:
 #      - ./litellm/litellm-config.yaml:/app/config.yaml
+#      - ./litellm/application_default_credentials.json:/app/application_default_credentials.json # only if using Google Vertex
+#    ports:
+#      - "4000:8000"
 #    command: [ "--config", "/app/config.yaml", "--port", "8000", "--num_workers", "8" ]
 #    environment:
+#      OPENAI_API_KEY: none ## needs to be set if ollama's openai api compatibility is used
+#      GOOGLE_APPLICATION_CREDENTIALS: /app/application_default_credentials.json ## only if using Google Vertex
 #      REDIS_HOST: redis
 #      REDIS_PORT: 6379
 #      REDIS_PASSWORD: RedisChangeMe
@@ -132,7 +153,7 @@ version: '3.4'
 #      REDIS_PASSWORD: RedisChangeMe
 #    volumes:
 #    - ./redis:/data
-  
+
 # # ADD LITELLM MONITORING
 #  langfuse-server:
 #    image: ghcr.io/langfuse/langfuse:latest

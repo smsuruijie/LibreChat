@@ -1,9 +1,9 @@
 import { expect, test } from '@playwright/test';
 import type { Response, Page, BrowserContext } from '@playwright/test';
 
-const basePath = 'http://localhost:3080/chat/';
+const basePath = 'http://localhost:3080/c/';
 const initialUrl = `${basePath}new`;
-const endpoints = ['google', 'openAI', 'azureOpenAI', 'bingAI', 'chatGPTBrowser', 'gptPlugins'];
+const endpoints = ['google', 'openAI', 'azureOpenAI'];
 const endpoint = endpoints[1];
 
 function isUUID(uuid: string) {
@@ -12,9 +12,7 @@ function isUUID(uuid: string) {
 }
 
 const waitForServerStream = async (response: Response) => {
-  const endpointCheck =
-    response.url().includes(`/api/ask/${endpoint}`) ||
-    response.url().includes(`/api/edit/${endpoint}`);
+  const endpointCheck = response.url().includes(`/api/agents`);
   return endpointCheck && response.status() === 200;
 };
 
@@ -78,7 +76,7 @@ test.describe('Messaging suite', () => {
     expect(currentUrl).toBe(initialUrl);
 
     //cleanup the conversation
-    await page.getByTestId('new-chat-button').click();
+    await page.getByTestId('nav-new-chat-button').click();
     expect(page.url()).toBe(initialUrl);
 
     // Click on the first conversation
@@ -98,11 +96,12 @@ test.describe('Messaging suite', () => {
     const updatedTextElement = page.getByText(editText);
     expect(updatedTextElement).toBeTruthy();
 
-    // Check edit response
+    // Check edit response. Nothing is typed into the editor, so the submit button reads
+    // "Rerun": reissuing an untouched request is a supported action, not a disabled one.
     await page.getByRole('button', { name: 'edit' }).click();
     const editResponsePromise = [
       page.waitForResponse(waitForServerStream),
-      await page.getByRole('button', { name: 'Save & Submit' }).click(),
+      await page.getByRole('button', { name: 'Rerun', exact: true }).click(),
     ];
 
     const [editResponse] = (await Promise.all(editResponsePromise)) as [Response];
@@ -158,7 +157,7 @@ test.describe('Messaging suite', () => {
     const currentUrl = page.url();
     const conversationId = currentUrl.split(basePath).pop() ?? '';
     expect(isUUID(conversationId)).toBeTruthy();
-    await page.getByTestId('new-chat-button').click();
+    await page.getByTestId('nav-new-chat-button').click();
     expect(page.url()).toBe(initialUrl);
   });
 });

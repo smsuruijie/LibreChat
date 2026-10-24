@@ -5,10 +5,10 @@
     "module": "esnext",
     "noImplicitAny": true,
     "outDir": "./types",
-    "target": "es5",
-    "moduleResolution": "node",
+    "target": "es2017",
+    "moduleResolution": "bundler",
     "allowSyntheticDefaultImports": true,
-    "lib": ["es2017", "dom"],
+    "lib": ["es2017", "dom", "ES2021.String"],
     "allowJs": true,
     "skipLibCheck": true,
     "esModuleInterop": true,
@@ -18,10 +18,10 @@
     "isolatedModules": true,
     "noEmit": true,
     "sourceMap": true,
-    "baseUrl": ".", // This should be the root of your package
+    "types": ["node", "jest"],
     "paths": {
-      // Add path mappings
-      "librechat-data-provider/react-query": ["./src/react-query/index.ts"]
+      "librechat-data-provider/react-query": ["./src/react-query/index.ts"],
+      "src/*": ["./src/*"]
     }
   },
   "exclude": ["node_modules", "dist", "types"],

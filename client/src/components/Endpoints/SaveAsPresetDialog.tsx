@@ -1,20 +1,28 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useId, useState } from 'react';
 import { useCreatePresetMutation } from 'librechat-data-provider/react-query';
+import {
+  OGDialogTemplate,
+  OGDialog,
+  Button,
+  Input,
+  Label,
+  useToastContext,
+} from '@librechat/client';
 import type { TEditPresetProps } from '~/common';
-import { cn, defaultTextPropsLabel, removeFocusOutlines, cleanupPreset } from '~/utils/';
-import DialogTemplate from '~/components/ui/DialogTemplate';
-import { Dialog, Input, Label } from '~/components/ui/';
 import { NotificationSeverity } from '~/common';
-import { useToastContext } from '~/Providers';
+import { cleanupPreset } from '~/utils';
 import { useLocalize } from '~/hooks';
 
 const SaveAsPresetDialog = ({ open, onOpenChange, preset }: TEditPresetProps) => {
-  const [title, setTitle] = useState<string>(preset?.title || 'My Preset');
+  const localize = useLocalize();
+  const formId = useId();
+  const inputId = `${formId}-name`;
+  const [title, setTitle] = useState<string>(preset.title ?? localize('com_endpoint_my_preset'));
   const createPresetMutation = useCreatePresetMutation();
   const { showToast } = useToastContext();
-  const localize = useLocalize();
 
-  const submitPreset = () => {
+  const submitPreset = (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
     const _preset = cleanupPreset({
       preset: {
         ...preset,
@@ -22,15 +30,15 @@ const SaveAsPresetDialog = ({ open, onOpenChange, preset }: TEditPresetProps) =>
       },
     });
 
-    const toastTitle = _preset.title
-      ? `\`${_preset.title}\``
-      : localize('com_endpoint_preset_title');
+    const toastTitle =
+      (_preset.title ?? '') ? `\`${_preset.title}\`` : localize('com_endpoint_preset_title');
 
     createPresetMutation.mutate(_preset, {
       onSuccess: () => {
         showToast({
-          message: `${toastTitle} ${localize('com_endpoint_preset_saved')}`,
+          message: `${toastTitle} ${localize('com_ui_saved')}`,
         });
+        onOpenChange(false); // Close the dialog on success
       },
       onError: () => {
         showToast({
@@ -42,43 +50,50 @@ const SaveAsPresetDialog = ({ open, onOpenChange, preset }: TEditPresetProps) =>
   };
 
   useEffect(() => {
-    setTitle(preset?.title || localize('com_endpoint_my_preset'));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open]);
+    if (open) {
+      setTitle(preset.title ?? localize('com_endpoint_my_preset'));
+    }
+  }, [localize, open, preset.title]);
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogTemplate
+    <OGDialog open={open} onOpenChange={onOpenChange}>
+      <OGDialogTemplate
         title={localize('com_endpoint_save_as_preset')}
-        className="w-11/12 sm:w-2/4"
+        className="z-[90] w-11/12 max-w-md"
+        overlayClassName="z-[80]"
         showCloseButton={false}
         main={
-          <div className="flex w-full flex-col items-center gap-2">
+          <form
+            id={formId}
+            onSubmit={submitPreset}
+            className="flex w-full flex-col items-center gap-2"
+          >
             <div className="grid w-full items-center gap-2">
-              <Label htmlFor="chatGptLabel" className="text-left text-sm font-medium">
+              <Label htmlFor={inputId} className="text-start text-sm font-medium">
                 {localize('com_endpoint_preset_name')}
               </Label>
               <Input
-                id="chatGptLabel"
+                id={inputId}
                 value={title || ''}
                 onChange={(e) => setTitle(e.target.value || '')}
-                placeholder="Set a custom name for this preset"
-                className={cn(
-                  defaultTextPropsLabel,
-                  'flex h-10 max-h-10 w-full resize-none border-gray-100 px-3 py-2 dark:border-gray-600',
-                  removeFocusOutlines,
-                )}
+                placeholder={localize('com_endpoint_preset_custom_name_placeholder')}
+                className="rounded-theme-control flex h-10 max-h-10 w-full resize-none"
               />
             </div>
-          </div>
+          </form>
         }
-        selection={{
-          selectHandler: submitPreset,
-          selectClasses: 'bg-green-500 hover:bg-green-600 dark:hover:bg-green-600 text-white',
-          selectText: localize('com_ui_save'),
-        }}
+        buttons={
+          <Button
+            type="submit"
+            form={formId}
+            variant="submit"
+            disabled={createPresetMutation.isLoading}
+          >
+            {localize('com_ui_save')}
+          </Button>
+        }
       />
-    </Dialog>
+    </OGDialog>
   );
 };
 

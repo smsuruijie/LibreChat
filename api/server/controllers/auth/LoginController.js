@@ -1,28 +1,14 @@
-const User = require('~/models/User');
+const { createLoginController, clearCloudFrontCookies } = require('@librechat/api');
+const { generate2FATempToken } = require('~/server/services/twoFactorService');
+const { getUserById, deleteAllUserSessions } = require('~/models');
 const { setAuthTokens } = require('~/server/services/AuthService');
-const { logger } = require('~/config');
 
-const loginController = async (req, res) => {
-  try {
-    const user = await User.findById(req.user._id);
+const loginController = createLoginController({
+  generate2FATempToken,
+  getUserById,
+  deleteAllUserSessions,
+  setAuthTokens,
+  clearCloudFrontCookies,
+});
 
-    // If user doesn't exist, return error
-    if (!user) {
-      // typeof user !== User) { // this doesn't seem to resolve the User type ??
-      return res.status(400).json({ message: 'Invalid credentials' });
-    }
-
-    const token = await setAuthTokens(user._id, res);
-
-    return res.status(200).send({ token, user });
-  } catch (err) {
-    logger.error('[loginController]', err);
-  }
-
-  // Generic error messages are safer
-  return res.status(500).json({ message: 'Something went wrong' });
-};
-
-module.exports = {
-  loginController,
-};
+module.exports = { loginController };

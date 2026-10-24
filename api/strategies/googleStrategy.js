@@ -1,48 +1,41 @@
 const { Strategy: GoogleStrategy } = require('passport-google-oauth20');
-const { createNewUser, handleExistingUser } = require('./process');
-const { logger } = require('~/config');
-const User = require('~/models/User');
+const { createOAuthStateStore } = require('@librechat/api');
+const socialLogin = require('./socialLogin');
 
-const googleLogin = async (accessToken, refreshToken, profile, cb) => {
-  try {
-    const email = profile.emails[0].value;
-    const googleId = profile.id;
-    const oldUser = await User.findOne({ email });
-    const ALLOW_SOCIAL_REGISTRATION =
-      process.env.ALLOW_SOCIAL_REGISTRATION?.toLowerCase() === 'true';
-    const avatarUrl = profile.photos[0].value;
+const getProfileDetails = ({ profile }) => ({
+  email: profile.emails[0].value,
+  id: profile.id,
+  avatarUrl: profile.photos[0].value,
+  username: profile.name.givenName,
+  name: `${profile.name.givenName}${profile.name.familyName ? ` ${profile.name.familyName}` : ''}`,
+  emailVerified: profile.emails[0].verified,
+});
 
-    if (oldUser) {
-      await handleExistingUser(oldUser, avatarUrl);
-      return cb(null, oldUser);
-    }
+const googleLogin = socialLogin('google', getProfileDetails);
+const googleAdminLogin = socialLogin('google', getProfileDetails, { existingUsersOnly: true });
 
-    if (ALLOW_SOCIAL_REGISTRATION) {
-      const newUser = await createNewUser({
-        email,
-        avatarUrl,
-        provider: 'google',
-        providerKey: 'googleId',
-        providerId: googleId,
-        username: profile.name.givenName,
-        name: `${profile.name.givenName} ${profile.name.familyName}`,
-        emailVerified: profile.emails[0].verified,
-      });
-      return cb(null, newUser);
-    }
-  } catch (err) {
-    logger.error('[googleLogin]', err);
-    return cb(err);
-  }
-};
+const getGoogleConfig = (callbackURL) => ({
+  clientID: process.env.GOOGLE_CLIENT_ID,
+  clientSecret: process.env.GOOGLE_CLIENT_SECRET,
+  callbackURL,
+  proxy: true,
+});
 
-module.exports = () =>
+/** @param {Omit<import('@librechat/api').OAuthStateStoreOptions, 'provider'>} stateOptions */
+const googleStrategy = (stateOptions) =>
   new GoogleStrategy(
     {
-      clientID: process.env.GOOGLE_CLIENT_ID,
-      clientSecret: process.env.GOOGLE_CLIENT_SECRET,
-      callbackURL: `${process.env.DOMAIN_SERVER}${process.env.GOOGLE_CALLBACK_URL}`,
-      proxy: true,
+      ...getGoogleConfig(`${process.env.DOMAIN_SERVER}${process.env.GOOGLE_CALLBACK_URL}`),
+      store: createOAuthStateStore({ ...stateOptions, provider: 'google' }),
     },
     googleLogin,
   );
+
+const googleAdminStrategy = () =>
+  new GoogleStrategy(
+    getGoogleConfig(`${process.env.DOMAIN_SERVER}/api/admin/oauth/google/callback`),
+    googleAdminLogin,
+  );
+
+module.exports = googleStrategy;
+module.exports.googleAdminLogin = googleAdminStrategy;

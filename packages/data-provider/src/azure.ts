@@ -4,52 +4,13 @@ import type {
   TAzureGroupMap,
   TAzureModelGroupMap,
   TValidatedAzureConfig,
+  TAzureConfigValidationResult,
 } from '../src/config';
-import { errorsToString, extractEnvVariable, envVarRegex } from '../src/parsers';
+import { extractEnvVariable, envVarRegex } from '../src/utils';
 import { azureGroupConfigsSchema } from '../src/config';
+import { errorsToString } from '../src/parsers';
 
-export const deprecatedAzureVariables = [
-  /* "related to" precedes description text */
-  { key: 'AZURE_OPENAI_DEFAULT_MODEL', description: 'setting a default model' },
-  { key: 'AZURE_OPENAI_MODELS', description: 'setting models' },
-  {
-    key: 'AZURE_USE_MODEL_AS_DEPLOYMENT_NAME',
-    description: 'using model names as deployment names',
-  },
-  { key: 'AZURE_API_KEY', description: 'setting a single Azure API key' },
-  { key: 'AZURE_OPENAI_API_INSTANCE_NAME', description: 'setting a single Azure instance name' },
-  {
-    key: 'AZURE_OPENAI_API_DEPLOYMENT_NAME',
-    description: 'setting a single Azure deployment name',
-  },
-  { key: 'AZURE_OPENAI_API_VERSION', description: 'setting a single Azure API version' },
-  {
-    key: 'AZURE_OPENAI_API_COMPLETIONS_DEPLOYMENT_NAME',
-    description: 'setting a single Azure completions deployment name',
-  },
-  {
-    key: 'AZURE_OPENAI_API_EMBEDDINGS_DEPLOYMENT_NAME',
-    description: 'setting a single Azure embeddings deployment name',
-  },
-  {
-    key: 'PLUGINS_USE_AZURE',
-    description: 'using Azure for Plugins',
-  },
-];
-
-export const conflictingAzureVariables = [
-  {
-    key: 'INSTANCE_NAME',
-  },
-  {
-    key: 'DEPLOYMENT_NAME',
-  },
-];
-
-export function validateAzureGroups(configs: TAzureGroups): TValidatedAzureConfig & {
-  isValid: boolean;
-  errors: (ZodError | string)[];
-} {
+export function validateAzureGroups(configs: TAzureGroups): TAzureConfigValidationResult {
   let isValid = true;
   const modelNames: string[] = [];
   const modelGroupMap: TAzureModelGroupMap = {};
@@ -65,13 +26,13 @@ export function validateAzureGroups(configs: TAzureGroups): TValidatedAzureConfi
       const {
         group: groupName,
         apiKey,
-        instanceName,
-        deploymentName,
-        version,
-        baseURL,
+        instanceName = '',
+        deploymentName = '',
+        version = '',
+        baseURL = '',
         additionalHeaders,
         models,
-        serverless,
+        serverless = false,
         ...rest
       } = group;
 
@@ -122,9 +83,11 @@ export function validateAzureGroups(configs: TAzureGroups): TValidatedAzureConfi
           continue;
         }
 
+        const groupDeploymentName = group.deploymentName ?? '';
+        const groupVersion = group.version ?? '';
         if (typeof model === 'boolean') {
           // For boolean models, check if group-level deploymentName and version are present.
-          if (!group.deploymentName || !group.version) {
+          if (!groupDeploymentName || !groupVersion) {
             errors.push(
               `Model "${modelName}" in group "${groupName}" is missing a deploymentName or version.`,
             );
@@ -135,11 +98,10 @@ export function validateAzureGroups(configs: TAzureGroups): TValidatedAzureConfi
             group: groupName,
           };
         } else {
+          const modelDeploymentName = model.deploymentName ?? '';
+          const modelVersion = model.version ?? '';
           // For object models, check if deploymentName and version are required but missing.
-          if (
-            (!model.deploymentName && !group.deploymentName) ||
-            (!model.version && !group.version)
-          ) {
+          if ((!modelDeploymentName && !groupDeploymentName) || (!modelVersion && !groupVersion)) {
             errors.push(
               `Model "${modelName}" in group "${groupName}" is missing a required deploymentName or version.`,
             );
@@ -148,8 +110,8 @@ export function validateAzureGroups(configs: TAzureGroups): TValidatedAzureConfi
 
           modelGroupMap[modelName] = {
             group: groupName,
-            // deploymentName: model.deploymentName || group.deploymentName,
-            // version: model.version || group.version,
+            // deploymentName: modelDeploymentName || groupDeploymentName,
+            // version: modelVersion || groupVersion,
           };
         }
       }
@@ -192,26 +154,28 @@ export function mapModelToAzureConfig({
     );
   }
 
-  const instanceName = groupConfig.instanceName;
+  const instanceName = groupConfig.instanceName ?? '';
 
-  if (!instanceName && !groupConfig.serverless) {
+  if (!instanceName && groupConfig.serverless !== true) {
     throw new Error(
       `Group "${modelConfig.group}" is missing an instanceName for non-serverless configuration.`,
     );
   }
 
-  if (groupConfig.serverless && !groupConfig.baseURL) {
+  const baseURL = groupConfig.baseURL ?? '';
+  if (groupConfig.serverless === true && !baseURL) {
     throw new Error(
       `Group "${modelConfig.group}" is missing the required base URL for serverless configuration.`,
     );
   }
 
-  if (groupConfig.serverless) {
+  if (groupConfig.serverless === true) {
     const result: MappedAzureConfig = {
       azureOptions: {
+        azureOpenAIApiVersion: extractEnvVariable(groupConfig.version ?? ''),
         azureOpenAIApiKey: extractEnvVariable(groupConfig.apiKey),
       },
-      baseURL: extractEnvVariable(groupConfig.baseURL as string),
+      baseURL: extractEnvVariable(baseURL),
       serverless: true,
     };
 
@@ -234,16 +198,16 @@ export function mapModelToAzureConfig({
   }
 
   const modelDetails = groupConfig.models[modelName];
-  const { deploymentName, version } =
+  const { deploymentName = '', version = '' } =
     typeof modelDetails === 'object'
       ? {
-        deploymentName: modelDetails.deploymentName || groupConfig.deploymentName,
-        version: modelDetails.version || groupConfig.version,
-      }
+          deploymentName: modelDetails.deploymentName ?? groupConfig.deploymentName,
+          version: modelDetails.version ?? groupConfig.version,
+        }
       : {
-        deploymentName: groupConfig.deploymentName,
-        version: groupConfig.version,
-      };
+          deploymentName: groupConfig.deploymentName,
+          version: groupConfig.version,
+        };
 
   if (!deploymentName || !version) {
     throw new Error(
@@ -266,91 +230,8 @@ export function mapModelToAzureConfig({
 
   const result: MappedAzureConfig = { azureOptions };
 
-  if (groupConfig.baseURL) {
-    result.baseURL = extractEnvVariable(groupConfig.baseURL);
-  }
-
-  if (groupConfig.additionalHeaders) {
-    result.headers = groupConfig.additionalHeaders;
-  }
-
-  return result;
-}
-
-export function mapGroupToAzureConfig({
-  groupName,
-  groupMap,
-}: {
-  groupName: string;
-  groupMap: TAzureGroupMap;
-}): MappedAzureConfig {
-  const groupConfig = groupMap[groupName];
-  if (!groupConfig) {
-    throw new Error(`Group named "${groupName}" not found in configuration.`);
-  }
-
-  const instanceName = groupConfig.instanceName as string;
-
-  if (!instanceName && !groupConfig.serverless) {
-    throw new Error(
-      `Group "${groupName}" is missing an instanceName for non-serverless configuration.`,
-    );
-  }
-
-  if (groupConfig.serverless && !groupConfig.baseURL) {
-    throw new Error(
-      `Group "${groupName}" is missing the required base URL for serverless configuration.`,
-    );
-  }
-
-  const models = Object.keys(groupConfig.models);
-  if (models.length === 0) {
-    throw new Error(`Group "${groupName}" does not have any models configured.`);
-  }
-
-  // Use the first available model in the group
-  const firstModelName = models[0];
-  const modelDetails = groupConfig.models[firstModelName];
-
-  const azureOptions: AzureOptions = {
-    azureOpenAIApiKey: extractEnvVariable(groupConfig.apiKey),
-    azureOpenAIApiInstanceName: extractEnvVariable(instanceName),
-    // DeploymentName and Version set below
-  };
-
-  if (groupConfig.serverless) {
-    return {
-      azureOptions,
-      baseURL: extractEnvVariable(groupConfig.baseURL ?? ''),
-      serverless: true,
-      ...(groupConfig.additionalHeaders && { headers: groupConfig.additionalHeaders }),
-    };
-  }
-
-  const { deploymentName, version } =
-    typeof modelDetails === 'object'
-      ? {
-        deploymentName: modelDetails.deploymentName || groupConfig.deploymentName,
-        version: modelDetails.version || groupConfig.version,
-      }
-      : {
-        deploymentName: groupConfig.deploymentName,
-        version: groupConfig.version,
-      };
-
-  if (!deploymentName || !version) {
-    throw new Error(
-      `Model "${firstModelName}" in group "${groupName}" or the group itself is missing a deploymentName ("${deploymentName}") or version ("${version}").`,
-    );
-  }
-
-  azureOptions.azureOpenAIApiDeploymentName = extractEnvVariable(deploymentName);
-  azureOptions.azureOpenAIApiVersion = extractEnvVariable(version);
-
-  const result: MappedAzureConfig = { azureOptions };
-
-  if (groupConfig.baseURL) {
-    result.baseURL = extractEnvVariable(groupConfig.baseURL);
+  if (baseURL) {
+    result.baseURL = extractEnvVariable(baseURL);
   }
 
   if (groupConfig.additionalHeaders) {

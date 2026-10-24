@@ -1,41 +1,24 @@
-import { TMessage } from 'librechat-data-provider';
-import { atom, selector } from 'recoil';
-import { buildTree } from '~/utils';
+import { atom } from 'recoil';
 
-const isSearchEnabled = atom<boolean | null>({
-  key: 'isSearchEnabled',
-  default: null,
-});
+export type SearchState = {
+  enabled: boolean | null;
+  query: string;
+  debouncedQuery: string;
+  isSearching: boolean;
+  isTyping: boolean;
+};
 
-const searchQuery = atom({
-  key: 'searchQuery',
-  default: '',
-});
-
-const searchResultMessages = atom<TMessage[] | null>({
-  key: 'searchResultMessages',
-  default: null,
-});
-
-const searchResultMessagesTree = selector({
-  key: 'searchResultMessagesTree',
-  get: ({ get }) => {
-    return buildTree({ messages: get(searchResultMessages), groupAll: true });
-  },
-});
-
-const isSearching = selector({
-  key: 'isSearching',
-  get: ({ get }) => {
-    const data = get(searchQuery);
-    return !!data;
+export const search = atom<SearchState>({
+  key: 'search',
+  default: {
+    enabled: null,
+    query: '',
+    debouncedQuery: '',
+    isSearching: false,
+    isTyping: false,
   },
 });
 
 export default {
-  isSearchEnabled,
-  isSearching,
-  searchResultMessages,
-  searchResultMessagesTree,
-  searchQuery,
+  search,
 };

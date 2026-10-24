@@ -1,50 +1,60 @@
+const { logger } = require('@librechat/data-schemas');
 const { errorsToString } = require('librechat-data-provider');
 const { Strategy: PassportLocalStrategy } = require('passport-local');
+const {
+  isEnabled,
+  comparePassword,
+  grandfatherLegacyEmailVerification,
+  compareSecret,
+} = require('@librechat/api');
+const { findUser, updateUser } = require('~/models');
 const { loginSchema } = require('./validators');
-const logger = require('~/utils/logger');
-const User = require('~/models/User');
 
 async function validateLoginRequest(req) {
   const { error } = loginSchema.safeParse(req.body);
   return error ? errorsToString(error.errors) : null;
 }
 
-async function findUserByEmail(email) {
-  return User.findOne({ email: email.trim() });
-}
-
-async function comparePassword(user, password) {
-  return new Promise((resolve, reject) => {
-    user.comparePassword(password, function (err, isMatch) {
-      if (err) {
-        return reject(err);
-      }
-      resolve(isMatch);
-    });
-  });
-}
-
 async function passportLogin(req, email, password, done) {
   try {
     const validationError = await validateLoginRequest(req);
     if (validationError) {
-      logError('Passport Local Strategy - Validation Error', { reqBody: req.body });
+      logError('Passport Local Strategy - Validation Error', { email: req.body?.email });
       logger.error(`[Login] [Login failed] [Username: ${email}] [Request-IP: ${req.ip}]`);
       return done(null, false, { message: validationError });
     }
 
-    const user = await findUserByEmail(email);
+    const user = await findUser({ email: email.trim() }, '+password');
     if (!user) {
       logError('Passport Local Strategy - User Not Found', { email });
       logger.error(`[Login] [Login failed] [Username: ${email}] [Request-IP: ${req.ip}]`);
       return done(null, false, { message: 'Email does not exist.' });
     }
 
-    const isMatch = await comparePassword(user, password);
+    if (!user.password) {
+      logError('Passport Local Strategy - User has no password', { email });
+      logger.error(`[Login] [Login failed] [Username: ${email}] [Request-IP: ${req.ip}]`);
+      return done(null, false, { message: 'Email does not exist.' });
+    }
+
+    const isMatch = await comparePassword(user, password, { compare: compareSecret });
     if (!isMatch) {
       logError('Passport Local Strategy - Password does not match', { isMatch });
       logger.error(`[Login] [Login failed] [Username: ${email}] [Request-IP: ${req.ip}]`);
       return done(null, false, { message: 'Incorrect password.' });
+    }
+
+    await grandfatherLegacyEmailVerification({ updateUser }, user);
+
+    const unverifiedAllowed = isEnabled(process.env.ALLOW_UNVERIFIED_EMAIL_LOGIN);
+    if (user.expiresAt && unverifiedAllowed) {
+      await updateUser(user._id, {});
+    }
+
+    if (!user.emailVerified && !unverifiedAllowed) {
+      logError('Passport Local Strategy - Email not verified', { email });
+      logger.error(`[Login] [Login failed] [Username: ${email}] [Request-IP: ${req.ip}]`);
+      return done(null, user, { message: 'Email not verified.' });
     }
 
     logger.info(`[Login] [Login successful] [Username: ${email}] [Request-IP: ${req.ip}]`);

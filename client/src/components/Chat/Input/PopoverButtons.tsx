@@ -1,10 +1,11 @@
-import { EModelEndpoint } from 'librechat-data-provider';
+import { useSetRecoilState } from 'recoil';
+import { Button, MessagesSquared } from '@librechat/client';
+import { EModelEndpoint, SettingsViews } from 'librechat-data-provider';
 import type { ReactNode } from 'react';
-import { MessagesSquared, GPTIcon } from '~/components/svg';
 import { useChatContext } from '~/Providers';
-import { Button } from '~/components/ui';
 import { useLocalize } from '~/hooks';
-import { cn } from '~/utils/';
+import { cn } from '~/utils';
+import store from '~/store';
 
 type TPopoverButton = {
   label: string;
@@ -16,54 +17,49 @@ type TPopoverButton = {
 export default function PopoverButtons({
   buttonClass,
   iconClass = '',
+  endpoint: _overrideEndpoint,
+  endpointType: overrideEndpointType,
+  model: overrideModel,
 }: {
   buttonClass?: string;
   iconClass?: string;
+  endpoint?: EModelEndpoint | string;
+  endpointType?: EModelEndpoint | string | null;
+  model?: string | null;
 }) {
-  const {
-    conversation,
-    optionSettings,
-    setOptionSettings,
-    showAgentSettings,
-    setShowAgentSettings,
-  } = useChatContext();
   const localize = useLocalize();
+  const { conversation, optionSettings, setOptionSettings } = useChatContext();
+  const setSettingsView = useSetRecoilState(store.currentSettingsView);
 
-  const { model, endpoint: _endpoint, endpointType } = conversation ?? {};
-  const endpoint = endpointType ?? _endpoint;
-  const isGenerativeModel = model?.toLowerCase()?.includes('gemini');
-  const isChatModel = !isGenerativeModel && model?.toLowerCase()?.includes('chat');
+  const { model: _model, endpoint: _endpoint, endpointType } = conversation ?? {};
+  const overrideEndpoint = overrideEndpointType ?? _overrideEndpoint;
+  const endpoint = overrideEndpoint ?? endpointType ?? _endpoint ?? '';
+  const model = overrideModel ?? _model;
+
+  const isGenerativeModel = /gemini|learnlm|gemma/.test(model ?? '') ?? false;
+  const isChatModel = (!isGenerativeModel && model?.toLowerCase().includes('chat')) ?? false;
   const isTextModel = !isGenerativeModel && !isChatModel && /code|text/.test(model ?? '');
 
   const { showExamples } = optionSettings;
   const showExamplesButton = !isGenerativeModel && !isTextModel && isChatModel;
 
-  const triggerExamples = () =>
-    setOptionSettings((prev) => ({ ...prev, showExamples: !prev.showExamples }));
+  const triggerExamples = () => {
+    setSettingsView(SettingsViews.default);
+    setOptionSettings((prev) => ({ ...prev, showExamples: !(prev.showExamples ?? false) }));
+  };
 
-  const buttons: { [key: string]: TPopoverButton[] } = {
+  const endpointSpecificbuttons: { [key: string]: TPopoverButton[] } = {
     [EModelEndpoint.google]: [
       {
-        label: localize(showExamples ? 'com_hide_examples' : 'com_show_examples'),
-        buttonClass: isGenerativeModel || isTextModel ? 'disabled' : '',
+        label: localize(showExamples === true ? 'com_hide_examples' : 'com_show_examples'),
+        buttonClass: isGenerativeModel === true || isTextModel ? 'disabled' : '',
         handler: triggerExamples,
-        icon: <MessagesSquared className={cn('mr-1 w-[14px]', iconClass)} />,
-      },
-    ],
-    [EModelEndpoint.gptPlugins]: [
-      {
-        label: localize(
-          showAgentSettings ? 'com_show_completion_settings' : 'com_show_agent_settings',
-        ),
-        buttonClass: '',
-        handler: () => setShowAgentSettings((prev) => !prev),
-        icon: <GPTIcon className={cn('mr-1 w-[14px]', iconClass)} size={24} />,
+        icon: <MessagesSquared className={cn('me-1 w-[0.875rem]', iconClass)} />,
       },
     ],
   };
 
-  const endpointButtons = buttons[endpoint ?? ''];
-  if (!endpointButtons) {
+  if (!endpoint) {
     return null;
   }
 
@@ -71,23 +67,28 @@ export default function PopoverButtons({
     return null;
   }
 
+  const endpointButtons = (endpointSpecificbuttons[endpoint] as TPopoverButton[] | null) ?? [];
+
   return (
-    <div>
-      {endpointButtons.map((button, index) => (
-        <Button
-          key={`button-${index}`}
-          type="button"
-          className={cn(
-            button.buttonClass,
-            'ml-1 h-auto justify-start bg-transparent px-2 py-1 text-xs font-medium font-normal text-black hover:bg-gray-100 hover:text-black focus:ring-0 focus:ring-offset-0 dark:bg-transparent dark:text-white dark:hover:bg-gray-700 dark:hover:text-white dark:focus:outline-none dark:focus:ring-offset-0',
-            buttonClass ?? '',
-          )}
-          onClick={button.handler}
-        >
-          {button.icon}
-          {button.label}
-        </Button>
-      ))}
+    <div className="flex w-full justify-between">
+      <div className="flex items-center justify-start">
+        {endpointButtons.map((button, index) => (
+          <Button
+            key={`button-${index}`}
+            type="button"
+            className={cn(
+              button.buttonClass,
+              'border-border-medium focus:ring-ring-primary border focus:ring-1',
+              'text-text-primary hover:bg-surface-hover ms-1 h-full bg-transparent px-2 py-1 text-xs font-normal',
+              buttonClass ?? '',
+            )}
+            onClick={button.handler}
+          >
+            {button.icon}
+            {button.label}
+          </Button>
+        ))}
+      </div>
     </div>
   );
 }

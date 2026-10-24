@@ -1,14 +1,21 @@
+const path = require('path');
 const { v4 } = require('uuid');
+const { countTokens, announceReply, isAnnounceableReply } = require('@librechat/api');
+const { escapeRegExp } = require('@librechat/data-schemas');
 const {
-  EModelEndpoint,
   Constants,
-  defaultOrderQuery,
   ContentTypes,
+  AnnotationTypes,
+  defaultOrderQuery,
 } = require('librechat-data-provider');
-const { recordMessage, getMessages } = require('~/models/Message');
-const { saveConvo } = require('~/models/Conversation');
-const spendTokens = require('~/models/spendTokens');
-const { countTokens } = require('~/server/utils');
+const {
+  saveConvo,
+  getMessages,
+  spendTokens,
+  saveMessage,
+  stampConvoLastResponse,
+} = require('~/models');
+const { retrieveAndProcessFile } = require('~/server/services/Files/process');
 
 /**
  * Initializes a new thread or adds messages to an existing thread.
@@ -31,13 +38,14 @@ async function initThread({ openai, body, thread_id: _thread_id }) {
     thread = await openai.beta.threads.create(body);
   }
 
-  const thread_id = _thread_id ?? thread.id;
+  const thread_id = _thread_id || thread.id;
   return { messages, thread_id, ...thread };
 }
 
 /**
  * Saves a user message to the DB in the Assistants endpoint format.
  *
+ * @param {Object} req - The request object.
  * @param {Object} params - The parameters of the user message
  * @param {string} params.user - The user's ID.
  * @param {string} params.text - The user's prompt.
@@ -46,6 +54,7 @@ async function initThread({ openai, body, thread_id: _thread_id }) {
  * @param {string} params.assistant_id - The current assistant Id.
  * @param {string} params.thread_id - The thread Id.
  * @param {string} params.conversationId - The message's conversationId
+ * @param {string} params.endpoint - The conversation endpoint
  * @param {string} [params.parentMessageId] - Optional if initial message.
  * Defaults to Constants.NO_PARENT.
  * @param {string} [params.instructions] - Optional: from preset for `instructions` field.
@@ -55,30 +64,12 @@ async function initThread({ openai, body, thread_id: _thread_id }) {
  * @param {string[]} [params.file_ids] - Optional. List of File IDs attached to the userMessage.
  * @return {Promise<Run>} A promise that resolves to the created run object.
  */
-async function saveUserMessage(params) {
+async function saveUserMessage(req, params) {
   const tokenCount = await countTokens(params.text);
-
-  // todo: do this on the frontend
-  // const { file_ids = [] } = params;
-  // let content;
-  // if (file_ids.length) {
-  //   content = [
-  //     {
-  //       value: params.text,
-  //     },
-  //     ...(
-  //       file_ids
-  //         .filter(f => f)
-  //         .map((file_id) => ({
-  //           file_id,
-  //         }))
-  //     ),
-  //   ];
-  // }
 
   const userMessage = {
     user: params.user,
-    endpoint: EModelEndpoint.assistants,
+    endpoint: params.endpoint,
     messageId: params.messageId,
     conversationId: params.conversationId,
     parentMessageId: params.parentMessageId ?? Constants.NO_PARENT,
@@ -91,57 +82,80 @@ async function saveUserMessage(params) {
     tokenCount,
   };
 
+  // Only confirmed new conversations seed membership; saveConvo applies it on insert.
+  const chatProjectId =
+    req?.resolvedConversation === null ? req.chatProjectContext?.projectId : undefined;
   const convo = {
-    endpoint: EModelEndpoint.assistants,
+    endpoint: params.endpoint,
     conversationId: params.conversationId,
     promptPrefix: params.promptPrefix,
     instructions: params.instructions,
     assistant_id: params.assistant_id,
     model: params.model,
+    ...(typeof chatProjectId === 'string' && chatProjectId ? { chatProjectId } : {}),
   };
-
   if (params.files?.length) {
     userMessage.files = params.files.map(({ file_id }) => ({ file_id }));
     convo.file_ids = params.file_ids;
   }
 
-  const message = await recordMessage(userMessage);
-  await saveConvo(params.user, convo);
-
+  const ctx = {
+    userId: req?.user?.id,
+    isTemporary: req?.resolvedConversation?.isTemporary ?? req?.body?.isTemporary,
+    expiredAt: req?.resolvedConversation?.expiredAt,
+    interfaceConfig: req?.config?.interfaceConfig,
+  };
+  const message = await saveMessage(ctx, userMessage);
+  const savedConvo = await saveConvo(
+    { ...ctx, expiredAt: message?.expiredAt ?? ctx.expiredAt },
+    convo,
+    {
+      context: 'api/server/services/Threads/manage.js #saveUserMessage',
+      ...(message?._id != null ? { appendMessageIds: [message._id] } : {}),
+    },
+  );
+  if (savedConvo != null) {
+    req.resolvedConversation = savedConvo;
+  }
   return message;
 }
 
 /**
  * Saves an Assistant message to the DB in the Assistants endpoint format.
  *
+ * @param {Object} req - The request object.
  * @param {Object} params - The parameters of the Assistant message
  * @param {string} params.user - The user's ID.
  * @param {string} params.messageId - The message Id.
+ * @param {string} params.text - The concatenated text of the message.
  * @param {string} params.assistant_id - The assistant Id.
  * @param {string} params.thread_id - The thread Id.
  * @param {string} params.model - The model used by the assistant.
  * @param {ContentPart[]} params.content - The message content parts.
  * @param {string} params.conversationId - The message's conversationId
+ * @param {string} params.endpoint - The conversation endpoint
  * @param {string} params.parentMessageId - The latest user message that triggered this response.
  * @param {string} [params.instructions] - Optional: from preset for `instructions` field.
+ * @param {string} [params.spec] - Optional: Model spec identifier.
+ * @param {string} [params.iconURL]
+ * @param {import('librechat-data-provider').TAttachment[]} [params.attachments]
  * Overrides the instructions of the assistant.
  * @param {string} [params.promptPrefix] - Optional: from preset for `additional_instructions` field.
- * @return {Promise<Run>} A promise that resolves to the created run object.
+ * @return {Promise<{message: Object|null, conversation: Object|null}>} The persisted assistant
+ * message and the conversation snapshot settled by the same write.
  */
-async function saveAssistantMessage(params) {
-  const text = params.content.reduce((acc, part) => {
-    if (!part.value) {
-      return acc;
-    }
-
-    return acc + ' ' + part.value;
-  }, '');
-
+async function saveAssistantMessage(req, params) {
   // const tokenCount = // TODO: need to count each content part
 
-  const message = await recordMessage({
+  const ctx = {
+    userId: req?.user?.id,
+    isTemporary: req?.resolvedConversation?.isTemporary ?? req?.body?.isTemporary,
+    expiredAt: req?.resolvedConversation?.expiredAt,
+    interfaceConfig: req?.config?.interfaceConfig,
+  };
+  const message = await saveMessage(ctx, {
     user: params.user,
-    endpoint: EModelEndpoint.assistants,
+    endpoint: params.endpoint,
     messageId: params.messageId,
     conversationId: params.conversationId,
     parentMessageId: params.parentMessageId,
@@ -149,22 +163,52 @@ async function saveAssistantMessage(params) {
     /* For messages, use the assistant_id instead of model */
     model: params.assistant_id,
     content: params.content,
+    attachments: params.attachments,
     sender: 'Assistant',
     isCreatedByUser: false,
-    text: text.trim(),
+    text: params.text,
+    unfinished: false,
     // tokenCount,
+    iconURL: params.iconURL,
+    spec: params.spec,
   });
 
-  await saveConvo(params.user, {
-    endpoint: EModelEndpoint.assistants,
-    conversationId: params.conversationId,
-    promptPrefix: params.promptPrefix,
-    instructions: params.instructions,
-    assistant_id: params.assistant_id,
-    model: params.model,
+  const announceable = isAnnounceableReply({
+    messageId: message?.messageId,
+    content: params.content,
+    text: params.text,
+    isTemporary: ctx.isTemporary,
   });
 
-  return message;
+  const savedConvo = await saveConvo(
+    { ...ctx, expiredAt: message?.expiredAt ?? ctx.expiredAt },
+    {
+      endpoint: params.endpoint,
+      conversationId: params.conversationId,
+      promptPrefix: params.promptPrefix,
+      instructions: params.instructions,
+      assistant_id: params.assistant_id,
+      model: params.model,
+      iconURL: params.iconURL,
+      spec: params.spec,
+    },
+    {
+      context: 'api/server/services/Threads/manage.js #saveAssistantMessage',
+      /** Judged by the same predicate every other persistence path asks, so an assistant row
+       *  that renders nothing cannot raise a dot here that opening the chat can never clear.
+       *  `saveConvo` assigns the timestamp past its own awaited reads, so a catch-up recorded
+       *  while one of them is in flight cannot outrank this reply. */
+      stampReply: announceable,
+      ...(announceable ? { replyMessageId: message.messageId } : {}),
+      ...(message?._id != null ? { appendMessageIds: [message._id] } : {}),
+    },
+  );
+
+  if (savedConvo != null) {
+    req.resolvedConversation = savedConvo;
+  }
+
+  return { message, conversation: savedConvo };
 }
 
 /**
@@ -181,7 +225,8 @@ async function addThreadMetadata({ openai, thread_id, messageId, messages }) {
   const promises = [];
   for (const message of messages) {
     promises.push(
-      openai.beta.threads.messages.update(thread_id, message.id, {
+      openai.beta.threads.messages.update(message.id, {
+        thread_id,
         metadata: {
           messageId,
         },
@@ -201,26 +246,37 @@ async function addThreadMetadata({ openai, thread_id, messageId, messages }) {
  *
  * @param {Object} params - The parameters for synchronizing messages.
  * @param {OpenAIClient} params.openai - The OpenAI client instance.
+ * @param {string} params.endpoint - The current endpoint.
+ * @param {string} params.thread_id - The current thread ID.
  * @param {TMessage[]} params.dbMessages - The LibreChat DB messages.
  * @param {ThreadMessage[]} params.apiMessages - The thread messages from the API.
- * @param {string} params.conversationId - The current conversation ID.
- * @param {string} params.thread_id - The current thread ID.
  * @param {string} [params.assistant_id] - The current assistant ID.
+ * @param {string} params.conversationId - The current conversation ID.
  * @return {Promise<TMessage[]>} A promise that resolves to the updated messages
  */
 async function syncMessages({
   openai,
-  apiMessages,
-  dbMessages,
-  conversationId,
+  endpoint,
   thread_id,
+  dbMessages,
+  apiMessages,
   assistant_id,
+  conversationId,
 }) {
   let result = [];
   let dbMessageMap = new Map(dbMessages.map((msg) => [msg.messageId, msg]));
 
   const modifyPromises = [];
   const recordPromises = [];
+  const ctx = {
+    userId: openai.req?.user?.id,
+    isTemporary: openai.req?.resolvedConversation?.isTemporary ?? openai.req?.body?.isTemporary,
+    expiredAt: openai.req?.resolvedConversation?.expiredAt,
+    interfaceConfig: openai.req?.config?.interfaceConfig,
+  };
+  /** The assistant writes this synchronization performed. Their results decide whether a reply
+   *  is actually in the history: a write that resolved empty must not raise an indicator. */
+  const assistantRecordPromises = [];
 
   /**
    *
@@ -231,7 +287,11 @@ async function syncMessages({
    * @param {dbMessage} params.apiMessage
    */
   const processNewMessage = async ({ dbMessage, apiMessage }) => {
-    recordPromises.push(recordMessage({ ...dbMessage, user: openai.req.user.id }));
+    const recorded = saveMessage(ctx, { ...dbMessage, user: openai.req.user.id });
+    recordPromises.push(recorded);
+    if (dbMessage.role === 'assistant') {
+      assistantRecordPromises.push(recorded);
+    }
 
     if (!apiMessage.id.includes('msg_')) {
       return;
@@ -250,7 +310,8 @@ async function syncMessages({
     }
 
     modifyPromises.push(
-      openai.beta.threads.messages.update(thread_id, apiMessage.id, {
+      openai.beta.threads.messages.update(apiMessage.id, {
+        thread_id,
         metadata: {
           messageId: dbMessage.messageId,
         },
@@ -286,7 +347,7 @@ async function syncMessages({
         thread_id,
         conversationId,
         messageId: v4(),
-        endpoint: EModelEndpoint.assistants,
+        endpoint,
         parentMessageId: lastMessage ? lastMessage.messageId : Constants.NO_PARENT,
         role: apiMessage.role,
         isCreatedByUser: apiMessage.role === 'user',
@@ -295,6 +356,7 @@ async function syncMessages({
         aggregateMessages: [{ id: apiMessage.id }],
         model: apiMessage.role === 'user' ? null : apiMessage.assistant_id,
         user: openai.req.user.id,
+        unfinished: false,
       };
 
       if (apiMessage.file_ids?.length) {
@@ -334,12 +396,40 @@ async function syncMessages({
   }, []);
 
   await Promise.all(modifyPromises);
+  const recordedAssistantReplies = await Promise.all(assistantRecordPromises);
   await Promise.all(recordPromises);
 
-  await saveConvo(openai.req.user.id, {
-    conversationId,
-    file_ids: attached_file_ids,
-  });
+  const savedConvo = await saveConvo(
+    ctx,
+    {
+      conversationId,
+      file_ids: attached_file_ids,
+    },
+    { context: 'api/server/services/Threads/manage.js #syncMessages' },
+  );
+  if (savedConvo != null) {
+    openai.req.resolvedConversation = savedConvo;
+  }
+
+  /* Every caller that reaches here recovers assistant output the normal save path never wrote:
+     a cancelled run, or one that errored after the model had already produced content. The
+     `saveConvo` above carries no reply stamp, so without this the recovered reply would never
+     raise its unseen indicator. Only a write that actually persisted counts, and it is
+     best-effort, since those messages are already durable.
+     A run cancelled before any output still persists the synthetic row `checkMessageGaps`
+     built, and the error handlers add their visible content to the returned object rather
+     than to that row: stamping it would raise a dot for a message that renders nothing, and
+     acknowledgement requires the stamped reply to be on screen. */
+  const persistedAssistantReply = recordedAssistantReplies.findLast((message) => message != null);
+  await announceReply(
+    { stampConvoLastResponse },
+    {
+      userId: openai.req.user.id,
+      conversationId,
+      reply: { ...persistedAssistantReply, isTemporary: ctx.isTemporary },
+      context: 'syncMessages',
+    },
+  );
 
   return result;
 }
@@ -378,16 +468,24 @@ function mapMessagesToSteps(steps, messages) {
  *
  * @param {Object} params - The parameters for initializing a thread.
  * @param {OpenAIClient} params.openai - The OpenAI client instance.
+ * @param {string} params.endpoint - The current endpoint.
  * @param {string} [params.latestMessageId] - Optional: The latest message ID from LibreChat.
  * @param {string} params.thread_id - Response thread ID.
  * @param {string} params.run_id - Response Run ID.
  * @param {string} params.conversationId - LibreChat conversation ID.
  * @return {Promise<TMessage[]>} A promise that resolves to the updated messages
  */
-async function checkMessageGaps({ openai, latestMessageId, thread_id, run_id, conversationId }) {
+async function checkMessageGaps({
+  openai,
+  endpoint,
+  latestMessageId,
+  thread_id,
+  run_id,
+  conversationId,
+}) {
   const promises = [];
   promises.push(openai.beta.threads.messages.list(thread_id, defaultOrderQuery));
-  promises.push(openai.beta.threads.runs.steps.list(thread_id, run_id));
+  promises.push(openai.beta.threads.runs.steps.list(run_id, { thread_id }));
   /** @type {[{ data: ThreadMessage[] }, { data: RunStep[] }]} */
   const [response, stepsResponse] = await Promise.all(promises);
 
@@ -402,6 +500,7 @@ async function checkMessageGaps({ openai, latestMessageId, thread_id, run_id, co
     role: 'assistant',
     run_id,
     thread_id,
+    endpoint,
     metadata: {
       messageId: latestMessageId,
     },
@@ -429,28 +528,31 @@ async function checkMessageGaps({ openai, latestMessageId, thread_id, run_id, co
   }
 
   let addedCurrentMessage = false;
-  const apiMessages = response.data.map((msg) => {
-    if (msg.id === currentMessage.id) {
-      addedCurrentMessage = true;
-      return currentMessage;
-    }
-    return msg;
-  });
+  const apiMessages = response.data
+    .map((msg) => {
+      if (msg.id === currentMessage.id) {
+        addedCurrentMessage = true;
+        return currentMessage;
+      }
+      return msg;
+    })
+    .sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
 
   if (!addedCurrentMessage) {
     apiMessages.push(currentMessage);
   }
 
-  const dbMessages = await getMessages({ conversationId });
+  const dbMessages = await getMessages({ conversationId, user: openai.req.user.id });
   const assistant_id = dbMessages?.[0]?.model;
 
   const syncedMessages = await syncMessages({
     openai,
+    endpoint,
+    thread_id,
     dbMessages,
     apiMessages,
-    thread_id,
-    conversationId,
     assistant_id,
+    conversationId,
   });
 
   return Object.values(
@@ -463,30 +565,203 @@ async function checkMessageGaps({ openai, latestMessageId, thread_id, run_id, co
 
 /**
  * Records token usage for a given completion request.
- *
  * @param {Object} params - The parameters for initializing a thread.
  * @param {number} params.prompt_tokens - The number of prompt tokens used.
  * @param {number} params.completion_tokens - The number of completion tokens used.
  * @param {string} params.model - The model used by the assistant run.
  * @param {string} params.user - The user's ID.
  * @param {string} params.conversationId - LibreChat conversation ID.
- * @return {Promise<TMessage[]>} A promise that resolves to the updated messages
+ * @param {string} [params.context='message'] - The context of the usage. Defaults to 'message'.
+ * @param {AppConfig['transactions']} [params.transactions] - Resolved transactions config.
+ * @return {Promise<void>}
  */
-const recordUsage = async ({ prompt_tokens, completion_tokens, model, user, conversationId }) => {
+const recordUsage = async ({
+  prompt_tokens,
+  completion_tokens,
+  model,
+  user,
+  conversationId,
+  context = 'message',
+  transactions,
+}) => {
   await spendTokens(
     {
       user,
       model,
-      context: 'message',
+      context,
       conversationId,
+      transactions,
     },
     { promptTokens: prompt_tokens, completionTokens: completion_tokens },
   );
 };
 
+const uniqueCitationStart = '^====||===';
+const uniqueCitationEnd = '==|||||^';
+const adjacentCitationRegex = new RegExp(
+  `${escapeRegExp(uniqueCitationStart)}(\\d+)${escapeRegExp(
+    uniqueCitationEnd,
+  )}(\\s*)${escapeRegExp(uniqueCitationStart)}(\\d+)${escapeRegExp(uniqueCitationEnd)}`,
+  'g',
+);
+const remainingAdjacentRegex = new RegExp(
+  `(${escapeRegExp(uniqueCitationStart)}(\\d+)${escapeRegExp(uniqueCitationEnd)})\\s*\\1+`,
+  'g',
+);
+const citationStartRegex = new RegExp(escapeRegExp(uniqueCitationStart), 'g');
+const citationEndRegex = new RegExp(escapeRegExp(uniqueCitationEnd), 'g');
+
+/**
+ * Sorts, processes, and flattens messages to a single string.
+ *
+ * @param {object} params - The parameters for processing messages.
+ * @param {OpenAIClient} params.openai - The OpenAI client instance.
+ * @param {RunClient} params.client - The LibreChat client that manages the run: either refers to `OpenAI` or `StreamRunManager`.
+ * @param {ThreadMessage[]} params.messages - An array of messages.
+ * @returns {Promise<{messages: ThreadMessage[], text: string, edited: boolean}>} The sorted messages, the flattened text, and whether it was edited.
+ */
+async function processMessages({ openai, client, messages = [] }) {
+  const sorted = messages.sort((a, b) => a.created_at - b.created_at);
+
+  let text = '';
+  let edited = false;
+  const sources = new Map();
+  const fileRetrievalPromises = [];
+
+  for (const message of sorted) {
+    message.files = [];
+    for (const content of message.content) {
+      const type = content.type;
+      const contentType = content[type];
+      const currentFileId = contentType?.file_id;
+
+      if (type === ContentTypes.IMAGE_FILE && !client.processedFileIds.has(currentFileId)) {
+        fileRetrievalPromises.push(
+          retrieveAndProcessFile({
+            openai,
+            client,
+            file_id: currentFileId,
+            basename: `${currentFileId}.png`,
+          })
+            .then((file) => {
+              client.processedFileIds.add(currentFileId);
+              message.files.push(file);
+            })
+            .catch((error) => {
+              console.error(`Failed to retrieve file: ${error.message}`);
+            }),
+        );
+        continue;
+      }
+
+      let currentText = contentType?.value ?? '';
+
+      /** @type {{ annotations: Annotation[] }} */
+      const { annotations } = contentType ?? {};
+
+      if (!annotations?.length) {
+        text += currentText;
+        continue;
+      }
+
+      const replacements = [];
+      const annotationPromises = annotations.map(async (annotation) => {
+        const type = annotation.type;
+        const annotationType = annotation[type];
+        const file_id = annotationType?.file_id;
+        const alreadyProcessed = client.processedFileIds.has(file_id);
+
+        let file;
+        let replacementText = '';
+
+        try {
+          if (alreadyProcessed) {
+            file = await retrieveAndProcessFile({ openai, client, file_id, unknownType: true });
+          } else if (type === AnnotationTypes.FILE_PATH) {
+            const basename = path.basename(annotation.text);
+            file = await retrieveAndProcessFile({
+              openai,
+              client,
+              file_id,
+              basename,
+            });
+            replacementText = file.filepath;
+          } else if (type === AnnotationTypes.FILE_CITATION && file_id) {
+            file = await retrieveAndProcessFile({
+              openai,
+              client,
+              file_id,
+              unknownType: true,
+            });
+            if (file && file.filename) {
+              if (!sources.has(file.filename)) {
+                sources.set(file.filename, sources.size + 1);
+              }
+              replacementText = `${uniqueCitationStart}${sources.get(
+                file.filename,
+              )}${uniqueCitationEnd}`;
+            }
+          }
+
+          if (file && replacementText) {
+            replacements.push({
+              start: annotation.start_index,
+              end: annotation.end_index,
+              text: replacementText,
+            });
+            edited = true;
+            if (!alreadyProcessed) {
+              client.processedFileIds.add(file_id);
+              message.files.push(file);
+            }
+          }
+        } catch (error) {
+          console.error(`Failed to process annotation: ${error.message}`);
+        }
+      });
+
+      await Promise.all(annotationPromises);
+
+      // Apply replacements in reverse order
+      replacements.sort((a, b) => b.start - a.start);
+      for (const { start, end, text: replacementText } of replacements) {
+        currentText = currentText.slice(0, start) + replacementText + currentText.slice(end);
+      }
+
+      text += currentText;
+    }
+  }
+
+  await Promise.all(fileRetrievalPromises);
+
+  // Handle adjacent identical citations with the unique format
+  text = text.replace(adjacentCitationRegex, (match, num1, space, num2) => {
+    return num1 === num2
+      ? `${uniqueCitationStart}${num1}${uniqueCitationEnd}`
+      : `${uniqueCitationStart}${num1}${uniqueCitationEnd}${space}${uniqueCitationStart}${num2}${uniqueCitationEnd}`;
+  });
+
+  // Remove any remaining adjacent identical citations
+  text = text.replace(remainingAdjacentRegex, '$1');
+
+  // Replace the unique citation format with the final format
+  text = text.replace(citationStartRegex, '^');
+  text = text.replace(citationEndRegex, '^');
+
+  if (sources.size) {
+    text += '\n\n';
+    Array.from(sources.entries()).forEach(([source, index], arrayIndex) => {
+      text += `^${index}.^ ${source}${arrayIndex === sources.size - 1 ? '' : '\n'}`;
+    });
+  }
+
+  return { messages: sorted, text, edited };
+}
+
 module.exports = {
   initThread,
   recordUsage,
+  processMessages,
   saveUserMessage,
   checkMessageGaps,
   addThreadMetadata,

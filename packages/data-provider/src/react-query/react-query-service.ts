@@ -1,55 +1,30 @@
-import {
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import type {
   UseQueryOptions,
-  useQuery,
-  useMutation,
-  useQueryClient,
   UseMutationResult,
   QueryObserverResult,
 } from '@tanstack/react-query';
-import * as t from '../types';
-import * as s from '../schemas';
-import * as m from '../types/mutations';
-import { defaultOrderQuery } from '../config';
+import type { MCPReinitializeResponse } from '../types/mcpServers';
+import { Constants, initialModelsConfig } from '../config';
+import { defaultOrderQuery } from '../types/assistants';
+import * as permissions from '../accessPermissions';
+import { ResourceType } from '../accessPermissions';
 import * as dataService from '../data-service';
-import request from '../request';
+import * as m from '../types/mutations';
+import * as q from '../types/queries';
 import { QueryKeys } from '../keys';
+import * as s from '../schemas';
+import * as t from '../types';
 
-export const useAbortRequestWithMessage = (): UseMutationResult<
-  void,
-  Error,
-  { endpoint: string; abortKey: string; message: string }
-> => {
-  const queryClient = useQueryClient();
-  return useMutation(
-    ({ endpoint, abortKey, message }) =>
-      dataService.abortRequestWithMessage(endpoint, abortKey, message),
-    {
-      onSuccess: () => {
-        queryClient.invalidateQueries([QueryKeys.balance]);
-      },
-    },
-  );
-};
+export { hasPermissions } from '../accessPermissions';
 
-export const useGetUserQuery = (
-  config?: UseQueryOptions<t.TUser>,
-): QueryObserverResult<t.TUser> => {
-  return useQuery<t.TUser>([QueryKeys.user], () => dataService.getUser(), {
-    refetchOnWindowFocus: false,
-    refetchOnReconnect: false,
-    refetchOnMount: false,
-    retry: false,
-    ...config,
-  });
-};
-
-export const useGetMessagesByConvoId = <TData = s.TMessage[]>(
-  id: string,
-  config?: UseQueryOptions<s.TMessage[], unknown, TData>,
-): QueryObserverResult<TData> => {
-  return useQuery<s.TMessage[], unknown, TData>(
-    [QueryKeys.messages, id],
-    () => dataService.getMessagesByConvoId(id),
+export const useGetSharedMessages = (
+  shareId: string,
+  config?: UseQueryOptions<t.TSharedMessagesResponse>,
+): QueryObserverResult<t.TSharedMessagesResponse> => {
+  return useQuery<t.TSharedMessagesResponse>(
+    [QueryKeys.sharedMessages, shareId],
+    () => dataService.getSharedMessages(shareId),
     {
       refetchOnWindowFocus: false,
       refetchOnReconnect: false,
@@ -59,15 +34,28 @@ export const useGetMessagesByConvoId = <TData = s.TMessage[]>(
   );
 };
 
-export const useGetUserBalance = (
-  config?: UseQueryOptions<string>,
-): QueryObserverResult<string> => {
-  return useQuery<string>([QueryKeys.balance], () => dataService.getUserBalance(), {
-    refetchOnWindowFocus: true,
-    refetchOnReconnect: true,
-    refetchOnMount: true,
-    ...config,
-  });
+export const useGetSharedLinkQuery = (
+  conversationId: string,
+  config?: UseQueryOptions<t.TSharedLinkGetResponse>,
+): QueryObserverResult<t.TSharedLinkGetResponse> => {
+  const queryClient = useQueryClient();
+  return useQuery<t.TSharedLinkGetResponse>(
+    [QueryKeys.sharedLinks, conversationId],
+    () => dataService.getSharedLink(conversationId),
+    {
+      enabled:
+        !!conversationId &&
+        conversationId !== Constants.NEW_CONVO &&
+        conversationId !== Constants.PENDING_CONVO,
+      refetchOnWindowFocus: false,
+      refetchOnReconnect: false,
+      refetchOnMount: false,
+      onSuccess: (data) => {
+        queryClient.setQueryData([QueryKeys.sharedLinks, conversationId], data);
+      },
+      ...config,
+    },
+  );
 };
 
 export const useGetConversationByIdQuery = (
@@ -86,18 +74,6 @@ export const useGetConversationByIdQuery = (
   );
 };
 
-//This isn't ideal because its just a query and we're using mutation, but it was the only way
-//to make it work with how the Chat component is structured
-export const useGetConversationByIdMutation = (id: string): UseMutationResult<s.TConversation> => {
-  const queryClient = useQueryClient();
-  return useMutation(() => dataService.getConversationById(id), {
-    // onSuccess: (res: s.TConversation) => {
-    onSuccess: () => {
-      queryClient.invalidateQueries([QueryKeys.conversation, id]);
-    },
-  });
-};
-
 export const useUpdateMessageMutation = (
   id: string,
 ): UseMutationResult<unknown, unknown, t.TUpdateMessageRequest, unknown> => {
@@ -107,6 +83,20 @@ export const useUpdateMessageMutation = (
       queryClient.invalidateQueries([QueryKeys.messages, id]);
     },
   });
+};
+
+export const useUpdateMessageContentMutation = (
+  conversationId: string,
+): UseMutationResult<unknown, unknown, t.TUpdateMessageContent, unknown> => {
+  const queryClient = useQueryClient();
+  return useMutation(
+    (payload: t.TUpdateMessageContent) => dataService.updateMessageContent(payload),
+    {
+      onSuccess: () => {
+        queryClient.invalidateQueries([QueryKeys.messages, conversationId]);
+      },
+    },
+  );
 };
 
 export const useUpdateUserKeysMutation = (): UseMutationResult<
@@ -119,6 +109,9 @@ export const useUpdateUserKeysMutation = (): UseMutationResult<
   return useMutation((payload: t.TUpdateUserKeyRequest) => dataService.updateUserKey(payload), {
     onSuccess: (data, variables) => {
       queryClient.invalidateQueries([QueryKeys.name, variables.name]);
+      queryClient.invalidateQueries([QueryKeys.models]);
+      /** token-config is derived from the same per-user model fetch */
+      queryClient.invalidateQueries([QueryKeys.tokenConfig]);
     },
   });
 };
@@ -128,6 +121,8 @@ export const useClearConversationsMutation = (): UseMutationResult<unknown> => {
   return useMutation(() => dataService.clearAllConversations(), {
     onSuccess: () => {
       queryClient.invalidateQueries([QueryKeys.allConversations]);
+      queryClient.invalidateQueries([QueryKeys.pinnedConversations]);
+      queryClient.invalidateQueries([QueryKeys.conversationTags]);
     },
   });
 };
@@ -137,11 +132,14 @@ export const useRevokeUserKeyMutation = (name: string): UseMutationResult<unknow
   return useMutation(() => dataService.revokeUserKey(name), {
     onSuccess: () => {
       queryClient.invalidateQueries([QueryKeys.name, name]);
-      if (name === s.EModelEndpoint.assistants) {
-        queryClient.invalidateQueries([QueryKeys.assistants, defaultOrderQuery]);
+      queryClient.invalidateQueries([QueryKeys.models]);
+      queryClient.invalidateQueries([QueryKeys.tokenConfig]);
+      if (s.isAssistantsEndpoint(name)) {
+        queryClient.invalidateQueries([QueryKeys.assistants, name, defaultOrderQuery]);
         queryClient.invalidateQueries([QueryKeys.assistantDocs]);
         queryClient.invalidateQueries([QueryKeys.assistants]);
         queryClient.invalidateQueries([QueryKeys.assistant]);
+        queryClient.invalidateQueries([QueryKeys.mcpTools]);
         queryClient.invalidateQueries([QueryKeys.actions]);
         queryClient.invalidateQueries([QueryKeys.tools]);
       }
@@ -154,67 +152,37 @@ export const useRevokeAllUserKeysMutation = (): UseMutationResult<unknown> => {
   return useMutation(() => dataService.revokeAllUserKeys(), {
     onSuccess: () => {
       queryClient.invalidateQueries([QueryKeys.name]);
-      queryClient.invalidateQueries([QueryKeys.assistants, defaultOrderQuery]);
+      queryClient.invalidateQueries([QueryKeys.tokenConfig]);
+      queryClient.invalidateQueries([
+        QueryKeys.assistants,
+        s.EModelEndpoint.assistants,
+        defaultOrderQuery,
+      ]);
+      queryClient.invalidateQueries([
+        QueryKeys.assistants,
+        s.EModelEndpoint.azureAssistants,
+        defaultOrderQuery,
+      ]);
       queryClient.invalidateQueries([QueryKeys.assistantDocs]);
       queryClient.invalidateQueries([QueryKeys.assistants]);
       queryClient.invalidateQueries([QueryKeys.assistant]);
+      queryClient.invalidateQueries([QueryKeys.mcpTools]);
       queryClient.invalidateQueries([QueryKeys.actions]);
       queryClient.invalidateQueries([QueryKeys.tools]);
+      queryClient.invalidateQueries([QueryKeys.models]);
     },
   });
-};
-
-export const useGetConversationsQuery = (
-  pageNumber: string,
-  config?: UseQueryOptions<t.TGetConversationsResponse>,
-): QueryObserverResult<t.TGetConversationsResponse> => {
-  return useQuery<t.TGetConversationsResponse>(
-    [QueryKeys.allConversations],
-    () => dataService.getConversations(pageNumber),
-    {
-      refetchOnReconnect: false,
-      refetchOnMount: false,
-      retry: 1,
-      ...config,
-    },
-  );
-};
-
-export const useGetSearchEnabledQuery = (
-  config?: UseQueryOptions<boolean>,
-): QueryObserverResult<boolean> => {
-  return useQuery<boolean>([QueryKeys.searchEnabled], () => dataService.getSearchEnabled(), {
-    refetchOnWindowFocus: false,
-    refetchOnReconnect: false,
-    refetchOnMount: false,
-    ...config,
-  });
-};
-
-export const useGetEndpointsQuery = <TData = t.TEndpointsConfig>(
-  config?: UseQueryOptions<t.TEndpointsConfig, unknown, TData>,
-): QueryObserverResult<TData> => {
-  return useQuery<t.TEndpointsConfig, unknown, TData>(
-    [QueryKeys.endpoints],
-    () => dataService.getAIEndpoints(),
-    {
-      staleTime: Infinity,
-      refetchOnWindowFocus: false,
-      refetchOnReconnect: false,
-      refetchOnMount: false,
-      ...config,
-    },
-  );
 };
 
 export const useGetModelsQuery = (
   config?: UseQueryOptions<t.TModelsConfig>,
 ): QueryObserverResult<t.TModelsConfig> => {
   return useQuery<t.TModelsConfig>([QueryKeys.models], () => dataService.getModels(), {
-    staleTime: Infinity,
+    initialData: initialModelsConfig,
     refetchOnWindowFocus: false,
     refetchOnReconnect: false,
     refetchOnMount: false,
+    staleTime: Infinity,
     ...config,
   });
 };
@@ -247,82 +215,22 @@ export const useDeletePresetMutation = (): UseMutationResult<
   });
 };
 
-export const useSearchQuery = (
-  searchQuery: string,
-  pageNumber: string,
-  config?: UseQueryOptions<t.TSearchResults>,
-): QueryObserverResult<t.TSearchResults> => {
-  return useQuery<t.TSearchResults>(
-    [QueryKeys.searchResults, pageNumber, searchQuery],
-    () => dataService.searchConversations(searchQuery, pageNumber),
+export const useRegisterUserMutation = (
+  options?: m.RegistrationOptions,
+): UseMutationResult<t.TError, unknown, t.TRegisterUser, unknown> => {
+  const queryClient = useQueryClient();
+  return useMutation<t.TRegisterUserResponse, t.TError, t.TRegisterUser>(
+    (payload: t.TRegisterUser) => dataService.register(payload),
     {
-      refetchOnWindowFocus: false,
-      refetchOnReconnect: false,
-      refetchOnMount: false,
-      ...config,
+      ...options,
+      onSuccess: (...args) => {
+        queryClient.invalidateQueries([QueryKeys.user]);
+        if (options?.onSuccess) {
+          options.onSuccess(...args);
+        }
+      },
     },
   );
-};
-
-export const useUpdateTokenCountMutation = (): UseMutationResult<
-  t.TUpdateTokenCountResponse,
-  unknown,
-  { text: string },
-  unknown
-> => {
-  const queryClient = useQueryClient();
-  return useMutation(({ text }: { text: string }) => dataService.updateTokenCount(text), {
-    onSuccess: () => {
-      queryClient.invalidateQueries([QueryKeys.tokenCount]);
-    },
-  });
-};
-
-export const useLoginUserMutation = (): UseMutationResult<
-  t.TLoginResponse,
-  unknown,
-  t.TLoginUser,
-  unknown
-> => {
-  const queryClient = useQueryClient();
-  return useMutation((payload: t.TLoginUser) => dataService.login(payload), {
-    onMutate: () => {
-      queryClient.removeQueries();
-      localStorage.removeItem('lastConversationSetup');
-      localStorage.removeItem('lastSelectedModel');
-      localStorage.removeItem('lastSelectedTools');
-      localStorage.removeItem('filesToDelete');
-      // localStorage.removeItem('lastAssistant');
-    },
-  });
-};
-
-export const useRegisterUserMutation = (): UseMutationResult<
-  unknown,
-  unknown,
-  t.TRegisterUser,
-  unknown
-> => {
-  const queryClient = useQueryClient();
-  return useMutation((payload: t.TRegisterUser) => dataService.register(payload), {
-    onSuccess: () => {
-      queryClient.invalidateQueries([QueryKeys.user]);
-    },
-  });
-};
-
-export const useRefreshTokenMutation = (): UseMutationResult<
-  t.TRefreshTokenResponse,
-  unknown,
-  unknown,
-  unknown
-> => {
-  const queryClient = useQueryClient();
-  return useMutation(() => request.refreshToken(), {
-    onMutate: () => {
-      queryClient.removeQueries();
-    },
-  });
 };
 
 export const useUserKeyQuery = (
@@ -367,40 +275,237 @@ export const useResetPasswordMutation = (): UseMutationResult<
   return useMutation((payload: t.TResetPassword) => dataService.resetPassword(payload));
 };
 
-export const useAvailablePluginsQuery = (): QueryObserverResult<s.TPlugin[]> => {
-  return useQuery<s.TPlugin[]>(
-    [QueryKeys.availablePlugins],
-    () => dataService.getAvailablePlugins(),
-    {
-      refetchOnWindowFocus: false,
-      refetchOnReconnect: false,
-      refetchOnMount: false,
-    },
-  );
-};
-
-export const useUpdateUserPluginsMutation = (): UseMutationResult<
-  t.TUser,
-  unknown,
-  t.TUpdateUserPlugins,
-  unknown
-> => {
+export const useUpdateUserPluginsMutation = (
+  _options?: m.UpdatePluginAuthOptions,
+): UseMutationResult<t.TUser, unknown, t.TUpdateUserPlugins, unknown> => {
   const queryClient = useQueryClient();
+  const { onSuccess, ...options } = _options ?? {};
   return useMutation((payload: t.TUpdateUserPlugins) => dataService.updateUserPlugins(payload), {
-    onSuccess: () => {
+    ...options,
+    onSuccess: (...args) => {
       queryClient.invalidateQueries([QueryKeys.user]);
+      onSuccess?.(...args);
+      if (args[1]?.action === 'uninstall' && args[1]?.pluginKey?.startsWith(Constants.mcp_prefix)) {
+        const serverName = args[1]?.pluginKey?.substring(Constants.mcp_prefix.length);
+        queryClient.invalidateQueries([QueryKeys.mcpAuthValues, serverName]);
+      }
     },
   });
 };
 
-export const useGetStartupConfig = (): QueryObserverResult<t.TStartupConfig> => {
-  return useQuery<t.TStartupConfig>(
-    [QueryKeys.startupConfig],
-    () => dataService.getStartupConfig(),
+export const useReinitializeMCPServerMutation = (): UseMutationResult<
+  MCPReinitializeResponse,
+  unknown,
+  string,
+  unknown
+> => {
+  const queryClient = useQueryClient();
+  return useMutation((serverName: string) => dataService.reinitializeMCPServer(serverName), {
+    onSuccess: () => {
+      queryClient.invalidateQueries([QueryKeys.mcpTools]);
+    },
+  });
+};
+
+export const useCancelMCPOAuthMutation = (): UseMutationResult<
+  m.CancelMCPOAuthResponse,
+  unknown,
+  string,
+  unknown
+> => {
+  const queryClient = useQueryClient();
+  return useMutation((serverName: string) => dataService.cancelMCPOAuth(serverName), {
+    onSuccess: () => {
+      queryClient.invalidateQueries([QueryKeys.mcpConnectionStatus]);
+    },
+  });
+};
+
+export const useGetCustomConfigSpeechQuery = (
+  config?: UseQueryOptions<t.TCustomConfigSpeechResponse>,
+): QueryObserverResult<t.TCustomConfigSpeechResponse> => {
+  return useQuery<t.TCustomConfigSpeechResponse>(
+    [QueryKeys.customConfigSpeech],
+    () => dataService.getCustomConfigSpeech(),
     {
       refetchOnWindowFocus: false,
       refetchOnReconnect: false,
       refetchOnMount: false,
+      ...config,
     },
   );
+};
+
+export const useUpdateFeedbackMutation = (
+  conversationId: string,
+  messageId: string,
+): UseMutationResult<t.TUpdateFeedbackResponse, Error, t.TUpdateFeedbackRequest> => {
+  const queryClient = useQueryClient();
+  return useMutation(
+    (payload: t.TUpdateFeedbackRequest) =>
+      dataService.updateFeedback(conversationId, messageId, payload),
+    {
+      onSuccess: () => {
+        queryClient.invalidateQueries([QueryKeys.messages, messageId]);
+      },
+    },
+  );
+};
+
+export const useSearchPrincipalsQuery = (
+  params: q.PrincipalSearchParams,
+  config?: UseQueryOptions<q.PrincipalSearchResponse>,
+): QueryObserverResult<q.PrincipalSearchResponse> => {
+  return useQuery<q.PrincipalSearchResponse>(
+    [QueryKeys.principalSearch, params],
+    () => dataService.searchPrincipals(params),
+    {
+      enabled: !!params.q && params.q.length >= 2,
+      refetchOnWindowFocus: false,
+      refetchOnReconnect: false,
+      refetchOnMount: false,
+      staleTime: 30000,
+      ...config,
+    },
+  );
+};
+
+export const useGetAccessRolesQuery = (
+  resourceType: ResourceType,
+  config?: UseQueryOptions<q.AccessRolesResponse>,
+): QueryObserverResult<q.AccessRolesResponse> => {
+  return useQuery<q.AccessRolesResponse>(
+    [QueryKeys.accessRoles, resourceType],
+    () => dataService.getAccessRoles(resourceType),
+    {
+      enabled: !!resourceType,
+      refetchOnWindowFocus: false,
+      refetchOnReconnect: false,
+      refetchOnMount: false,
+      staleTime: 5 * 60 * 1000, // Cache for 5 minutes
+      ...config,
+    },
+  );
+};
+
+export const useGetResourcePermissionsQuery = (
+  resourceType: ResourceType,
+  resourceId: string,
+  config?: UseQueryOptions<permissions.TGetResourcePermissionsResponse>,
+): QueryObserverResult<permissions.TGetResourcePermissionsResponse> => {
+  return useQuery<permissions.TGetResourcePermissionsResponse>(
+    [QueryKeys.resourcePermissions, resourceType, resourceId],
+    () => dataService.getResourcePermissions(resourceType, resourceId),
+    {
+      enabled: !!resourceType && !!resourceId,
+      refetchOnWindowFocus: false,
+      refetchOnReconnect: false,
+      refetchOnMount: false,
+      staleTime: 2 * 60 * 1000, // Cache for 2 minutes
+      ...config,
+    },
+  );
+};
+
+export const useUpdateResourcePermissionsMutation = (): UseMutationResult<
+  permissions.TUpdateResourcePermissionsResponse,
+  Error,
+  {
+    resourceType: ResourceType;
+    resourceId: string;
+    data: permissions.TUpdateResourcePermissionsRequest;
+  }
+> => {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: ({ resourceType, resourceId, data }) =>
+      dataService.updateResourcePermissions(resourceType, resourceId, data),
+    onSuccess: (_, variables) => {
+      queryClient.invalidateQueries({
+        queryKey: [QueryKeys.accessRoles, variables.resourceType],
+      });
+
+      queryClient.invalidateQueries({
+        queryKey: [QueryKeys.resourcePermissions, variables.resourceType, variables.resourceId],
+      });
+
+      queryClient.invalidateQueries({
+        queryKey: [QueryKeys.effectivePermissions, variables.resourceType, variables.resourceId],
+      });
+
+      queryClient.invalidateQueries({
+        queryKey: [QueryKeys.effectivePermissions, 'all', variables.resourceType],
+      });
+    },
+  });
+};
+
+export const useGetEffectivePermissionsQuery = (
+  resourceType: ResourceType,
+  resourceId: string,
+  config?: UseQueryOptions<permissions.TEffectivePermissionsResponse>,
+): QueryObserverResult<permissions.TEffectivePermissionsResponse> => {
+  return useQuery<permissions.TEffectivePermissionsResponse>({
+    queryKey: [QueryKeys.effectivePermissions, resourceType, resourceId],
+    queryFn: () => dataService.getEffectivePermissions(resourceType, resourceId),
+    enabled: !!resourceType && !!resourceId,
+    refetchOnWindowFocus: false,
+    staleTime: 30000,
+    ...config,
+  });
+};
+
+export const useGetAllEffectivePermissionsQuery = (
+  resourceType: ResourceType,
+  config?: UseQueryOptions<permissions.TAllEffectivePermissionsResponse>,
+): QueryObserverResult<permissions.TAllEffectivePermissionsResponse> => {
+  return useQuery<permissions.TAllEffectivePermissionsResponse>({
+    queryKey: [QueryKeys.effectivePermissions, 'all', resourceType],
+    queryFn: () => dataService.getAllEffectivePermissions(resourceType),
+    enabled: !!resourceType,
+    refetchOnWindowFocus: false,
+    staleTime: 30000,
+    ...config,
+  });
+};
+
+export const useGetAgentApiKeysQuery = (
+  config?: UseQueryOptions<t.TAgentApiKeyListResponse>,
+): QueryObserverResult<t.TAgentApiKeyListResponse> => {
+  return useQuery<t.TAgentApiKeyListResponse>(
+    [QueryKeys.agentApiKeys],
+    () => dataService.getAgentApiKeys(),
+    {
+      refetchOnWindowFocus: false,
+      refetchOnReconnect: false,
+      refetchOnMount: false,
+      ...config,
+    },
+  );
+};
+
+export const useCreateAgentApiKeyMutation = (): UseMutationResult<
+  t.TAgentApiKeyCreateResponse,
+  unknown,
+  t.TAgentApiKeyCreateRequest
+> => {
+  const queryClient = useQueryClient();
+  return useMutation(
+    (payload: t.TAgentApiKeyCreateRequest) => dataService.createAgentApiKey(payload),
+    {
+      onSuccess: () => {
+        queryClient.invalidateQueries([QueryKeys.agentApiKeys]);
+      },
+    },
+  );
+};
+
+export const useDeleteAgentApiKeyMutation = (): UseMutationResult<void, unknown, string> => {
+  const queryClient = useQueryClient();
+  return useMutation((id: string) => dataService.deleteAgentApiKey(id), {
+    onSuccess: () => {
+      queryClient.invalidateQueries([QueryKeys.agentApiKeys]);
+    },
+  });
 };

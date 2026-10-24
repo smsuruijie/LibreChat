@@ -1,60 +1,32 @@
+const mongoose = require('mongoose');
+const { createMethods } = require('@librechat/data-schemas');
 const {
-  getMessages,
-  saveMessage,
-  recordMessage,
-  updateMessage,
-  deleteMessagesSince,
-  deleteMessages,
-} = require('./Message');
-const { getConvoTitle, getConvo, saveConvo, deleteConvos } = require('./Conversation');
-const { getPreset, getPresets, savePreset, deletePresets } = require('./Preset');
-const { hashPassword, getUser, updateUser } = require('./userMethods');
-const {
-  findFileById,
-  createFile,
-  updateFile,
-  deleteFile,
-  deleteFiles,
-  getFiles,
-  updateFileUsage,
-} = require('./File');
-const Key = require('./Key');
-const User = require('./User');
-const Session = require('./Session');
-const Balance = require('./Balance');
+  matchModelName,
+  findMatchingPattern,
+  isDeploymentSkillId,
+  createMessageBudgetReader,
+} = require('@librechat/api');
+const getLogStores = require('~/cache/getLogStores');
+
+const messageBudget = createMessageBudgetReader();
+
+const methods = createMethods(mongoose, {
+  matchModelName,
+  findMatchingPattern,
+  isExternalSkillId: isDeploymentSkillId,
+  getCache: getLogStores,
+  getMCPAppMessageBudget: messageBudget.getBudget,
+});
+
+const seedDatabase = async () => {
+  await methods.initializeRoles();
+  await methods.seedDefaultRoles();
+  await methods.ensureDefaultCategories();
+  await methods.seedSystemGrants();
+};
 
 module.exports = {
-  User,
-  Key,
-  Session,
-  Balance,
-
-  hashPassword,
-  updateUser,
-  getUser,
-
-  getMessages,
-  saveMessage,
-  recordMessage,
-  updateMessage,
-  deleteMessagesSince,
-  deleteMessages,
-
-  getConvoTitle,
-  getConvo,
-  saveConvo,
-  deleteConvos,
-
-  getPreset,
-  getPresets,
-  savePreset,
-  deletePresets,
-
-  findFileById,
-  createFile,
-  updateFile,
-  deleteFile,
-  deleteFiles,
-  getFiles,
-  updateFileUsage,
+  ...methods,
+  initializeMessageBudget: messageBudget.initialize,
+  seedDatabase,
 };

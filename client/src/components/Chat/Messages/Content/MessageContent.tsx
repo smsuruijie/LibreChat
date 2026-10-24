@@ -1,83 +1,161 @@
-import { Fragment, Suspense } from 'react';
-import type { TResPlugin, TFile } from 'librechat-data-provider';
-import type { TMessageContentProps, TText, TDisplayProps } from '~/common';
-import FileContainer from '~/components/Chat/Input/Files/FileContainer';
-import Plugin from '~/components/Messages/Content/Plugin';
+import { memo, Suspense, useMemo } from 'react';
+import { Alert, DelayedRender } from '@librechat/client';
+import { EmptyText, CollapsibleText } from '@librechat/chat/components';
+import { Constants, parseThinkingContent } from 'librechat-data-provider';
+import type { TMessage } from 'librechat-data-provider';
+import type { TMessageContentProps, TDisplayProps } from '~/common';
+import AttachmentRecoveryActions from '~/components/Messages/Content/Error/recovery';
+import { useMessagePartsHost } from '~/Providers/MessagePartsHostContext';
+import useSmoothStreaming from '~/hooks/Messages/useSmoothStreaming';
 import Error from '~/components/Messages/Content/Error';
-import { DelayedRender } from '~/components/ui';
-import { useAuthContext } from '~/hooks';
+import ToolCallLimitNotice from './ToolCallLimitNotice';
+import MarkdownLite from './MarkdownLite';
 import EditMessage from './EditMessage';
+import Thinking from './Parts/Thinking';
+import { useLocalize } from '~/hooks';
 import Container from './Container';
 import Markdown from './Markdown';
 import { cn } from '~/utils';
-import Image from './Image';
 
-export const ErrorMessage = ({ text }: TText) => {
-  const { logout } = useAuthContext();
+const ERROR_CONNECTION_TEXT = 'Error connecting to server, try refreshing the page.';
+const DELAYED_ERROR_TIMEOUT = 5500;
+const UNFINISHED_DELAY = 250;
 
-  if (text.includes('ban')) {
-    logout();
-    return null;
-  }
-  return (
-    <Container>
-      <div className="rounded-md border border-red-500 bg-red-500/10 px-3 py-2 text-sm text-gray-600 dark:text-gray-200">
-        <Error text={text} />
-      </div>
-    </Container>
-  );
-};
-
-// Display Message Component
-const DisplayMessage = ({ text, isCreatedByUser, message, showCursor }: TDisplayProps) => {
-  const files: TFile[] = [];
-  const imageFiles = message?.files
-    ? message.files.filter((file) => {
-      if (file.type && file.type.startsWith('image/')) {
-        return true;
-      }
-
-      files.push(file);
-    })
-    : null;
-  return (
-    <Container>
-      {files.length > 0 && files.map((file) => <FileContainer key={file.file_id} file={file} />)}
-      {imageFiles &&
-        imageFiles.map((file) => (
-          <Image
-            key={file.file_id}
-            imagePath={file?.preview ?? file.filepath ?? ''}
-            height={file.height ?? 1920}
-            width={file.width ?? 1080}
-            altText={file.filename ?? 'Uploaded Image'}
-            // n={imageFiles.length}
-            // i={i}
-          />
-        ))}
-      <div
-        className={cn(
-          showCursor && !!text?.length ? 'result-streaming' : '',
-          'markdown prose dark:prose-invert light w-full break-words',
-          isCreatedByUser ? 'whitespace-pre-wrap dark:text-gray-20' : 'dark:text-gray-100',
-        )}
-      >
-        {!isCreatedByUser ? (
-          <Markdown content={text} message={message} showCursor={showCursor} />
-        ) : (
-          <>{text}</>
-        )}
-      </div>
-    </Container>
-  );
-};
-
-// Unfinished Message Component
-export const UnfinishedMessage = () => (
-  <ErrorMessage text="The response is incomplete; it's either still processing, was cancelled, or censored. Refresh or try a different prompt." />
+const LoadingFallback = () => (
+  <div className="mb-[0.625rem]">
+    <EmptyText underHeaderIcon />
+  </div>
 );
 
-// Content Component
+const ErrorBox = ({
+  children,
+  className = '',
+}: {
+  children: React.ReactNode;
+  className?: string;
+}) => (
+  <div
+    role="alert"
+    aria-live="assertive"
+    className={cn(
+      'border-status-error-border bg-status-error-subtle text-text-secondary rounded-xl border p-3 text-sm',
+      className,
+    )}
+  >
+    {children}
+  </div>
+);
+
+const ConnectionError = ({ message }: { message?: TMessage }) => {
+  const localize = useLocalize();
+
+  return (
+    <Suspense fallback={<LoadingFallback />}>
+      <DelayedRender delay={DELAYED_ERROR_TIMEOUT}>
+        <Container message={message}>
+          {/* `text-text-secondary` overrides the variant's `text-status-error`: this card sits in
+              the transcript beside `ErrorBox`, and every other failure there states itself in the
+              ordinary copy color. The red border and fill still mark it as an error. */}
+          <Alert
+            variant="error"
+            icon={false}
+            elevation="raised"
+            className="text-text-secondary mt-2 transition-all"
+          >
+            {localize('com_ui_error_connection')}
+          </Alert>
+        </Container>
+      </DelayedRender>
+    </Suspense>
+  );
+};
+
+export const ErrorMessage = ({
+  text,
+  message,
+  className = '',
+}: Pick<TDisplayProps, 'text' | 'className'> & { message?: TMessage }) => {
+  if (text === ERROR_CONNECTION_TEXT) {
+    return <ConnectionError message={message} />;
+  }
+
+  return (
+    <Container message={message}>
+      <ErrorBox className={className}>
+        <Error text={text} message={message} />
+        <AttachmentRecoveryActions text={text} messageId={message?.messageId} />
+      </ErrorBox>
+    </Container>
+  );
+};
+
+export const DisplayMessage = ({ text, isCreatedByUser, message, showCursor }: TDisplayProps) => {
+  const { useMessage, useUserTextPreferences } = useMessagePartsHost();
+  const { isSubmitting = false, isLatestMessage = false } = useMessage();
+  const { enableUserMsgMarkdown, collapseLongUserMessages } = useUserTextPreferences();
+  const smoothStreaming = useSmoothStreaming();
+
+  // The word fade itself indicates streaming, so the trailing block cursor
+  // only shows when the fade is unavailable (setting off or reduced motion).
+  const showCursorState = useMemo(
+    () => showCursor === true && isSubmitting && !(smoothStreaming && !isCreatedByUser),
+    [showCursor, isSubmitting, smoothStreaming, isCreatedByUser],
+  );
+
+  const content = useMemo(() => {
+    if (!isCreatedByUser) {
+      return <Markdown content={text} isLatestMessage={isLatestMessage} />;
+    }
+    if (enableUserMsgMarkdown) {
+      return <MarkdownLite content={text} />;
+    }
+    return <>{text}</>;
+  }, [isCreatedByUser, enableUserMsgMarkdown, text, isLatestMessage]);
+
+  return (
+    <Container message={message}>
+      <CollapsibleText enabled={isCreatedByUser && collapseLongUserMessages}>
+        <div
+          className={cn(
+            'markdown prose message-content light w-full break-words',
+            isSubmitting && 'submitting',
+            showCursorState && text.length > 0 && 'result-streaming',
+            isCreatedByUser && !enableUserMsgMarkdown && 'whitespace-pre-wrap',
+            'text-text-primary',
+          )}
+        >
+          {content}
+        </div>
+      </CollapsibleText>
+    </Container>
+  );
+};
+
+export const UnfinishedMessage = ({ message }: { message: TMessage }) => {
+  const localize = useLocalize();
+
+  /** Ran out of steps, not broken: a distinct, actionable card rather than the
+   *  generic "something went wrong, try again" warning. */
+  if (message.finish_reason === Constants.TOOL_CALL_LIMIT_FINISH_REASON) {
+    return (
+      <Container message={message}>
+        <ToolCallLimitNotice message={message} />
+      </Container>
+    );
+  }
+
+  /**
+   * Copy this app authored, not a persisted failure: it goes straight into the error box. Routing
+   * it through `Error` would have the unclassified-text path treat the sentence as provider prose
+   * and headline it with "<provider> could not complete this request".
+   */
+  return (
+    <Container message={message}>
+      <ErrorBox>{localize('com_ui_response_incomplete')}</ErrorBox>
+    </Container>
+  );
+};
+
 const MessageContent = ({
   text,
   edit,
@@ -87,72 +165,49 @@ const MessageContent = ({
   isLast,
   ...props
 }: TMessageContentProps) => {
+  const { message } = props;
+  const { messageId } = message;
+
+  const { thinkingContent, regularContent } = useMemo(() => parseThinkingContent(text), [text]);
+  const showRegularCursor = useMemo(() => isLast && isSubmitting, [isLast, isSubmitting]);
+
+  const unfinishedMessage = useMemo(
+    () =>
+      !isSubmitting && unfinished ? (
+        <Suspense>
+          <DelayedRender delay={UNFINISHED_DELAY}>
+            <UnfinishedMessage message={message} />
+          </DelayedRender>
+        </Suspense>
+      ) : null,
+    [isSubmitting, unfinished, message],
+  );
+
   if (error) {
-    return <ErrorMessage text={text} />;
-  } else if (edit) {
-    return <EditMessage text={text} isSubmitting={isSubmitting} {...props} />;
-  } else {
-    const marker = ':::plugin:::\n';
-    const splitText = text.split(marker);
-    const { message } = props;
-    const { plugins, messageId } = message;
-    const displayedIndices = new Set<number>();
-    // Function to get the next non-empty text index
-    const getNextNonEmptyTextIndex = (currentIndex: number) => {
-      for (let i = currentIndex + 1; i < splitText.length; i++) {
-        // Allow the last index to be last in case it has text
-        // this may need to change if I add back streaming
-        if (i === splitText.length - 1) {
-          return currentIndex;
-        }
-
-        if (splitText[i].trim() !== '' && !displayedIndices.has(i)) {
-          return i;
-        }
-      }
-      return currentIndex; // If no non-empty text is found, return the current index
-    };
-
-    return splitText.map((text, idx) => {
-      let currentText = text.trim();
-      let plugin: TResPlugin | null = null;
-
-      if (plugins) {
-        plugin = plugins[idx];
-      }
-
-      // If the current text is empty, get the next non-empty text index
-      const displayTextIndex = currentText === '' ? getNextNonEmptyTextIndex(idx) : idx;
-      currentText = splitText[displayTextIndex];
-      const isLastIndex = displayTextIndex === splitText.length - 1;
-      const isEmpty = currentText.trim() === '';
-      const showText =
-        (currentText && !isEmpty && !displayedIndices.has(displayTextIndex)) ||
-        (isEmpty && isLastIndex);
-      displayedIndices.add(displayTextIndex);
-
-      return (
-        <Fragment key={idx}>
-          {plugin && <Plugin key={`plugin-${messageId}-${idx}`} plugin={plugin} />}
-          {showText ? (
-            <DisplayMessage
-              key={`display-${messageId}-${idx}`}
-              showCursor={isLastIndex && isLast && isSubmitting}
-              text={currentText}
-              {...props}
-            />
-          ) : null}
-          {!isSubmitting && unfinished && (
-            <Suspense>
-              <DelayedRender delay={250}>
-                <UnfinishedMessage key={`unfinished-${messageId}-${idx}`} />
-              </DelayedRender>
-            </Suspense>
-          )}
-        </Fragment>
-      );
-    });
+    return <ErrorMessage message={message} text={text} />;
   }
+
+  if (edit) {
+    return <EditMessage text={text} isSubmitting={isSubmitting} {...props} />;
+  }
+
+  return (
+    <>
+      {thinkingContent.length > 0 && (
+        <Thinking key={`thinking-${messageId}`}>{thinkingContent}</Thinking>
+      )}
+      <DisplayMessage
+        key={`display-${messageId}`}
+        showCursor={showRegularCursor}
+        text={regularContent}
+        {...props}
+      />
+      {unfinishedMessage}
+    </>
+  );
 };
 
-export default MessageContent;
+const MemoizedMessageContent = memo(MessageContent);
+MemoizedMessageContent.displayName = 'MessageContent';
+
+export default MemoizedMessageContent;

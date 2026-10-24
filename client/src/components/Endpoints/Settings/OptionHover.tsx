@@ -1,7 +1,7 @@
 import React from 'react';
-import { HoverCardPortal, HoverCardContent } from '~/components/ui';
-import { ESide } from '~/common';
+import { HoverCardPortal, HoverCardContent } from '@librechat/client';
 import { useLocalize } from '~/hooks';
+import { ESide } from '~/common';
 
 type TOptionHoverProps = {
   endpoint: string;
@@ -26,6 +26,7 @@ const types = {
     topk: 'com_endpoint_anthropic_topk',
     maxoutputtokens: 'com_endpoint_anthropic_maxoutputtokens',
     resend: openAI.resend,
+    promptcache: 'com_endpoint_anthropic_prompt_cache',
   },
   google: {
     temp: 'com_endpoint_google_temp',
@@ -35,16 +36,11 @@ const types = {
   },
   openAI,
   azureOpenAI: openAI,
-  gptPlugins: {
-    func: 'com_endpoint_func_hover',
-    skip: 'com_endpoint_skip_hover',
-    ...openAI,
-  },
 };
 
 function OptionHover({ endpoint, type, side }: TOptionHoverProps) {
   const localize = useLocalize();
-  const text = types?.[endpoint]?.[type];
+  const text = types[endpoint]?.[type];
   if (!text) {
     return null;
   }
@@ -52,7 +48,7 @@ function OptionHover({ endpoint, type, side }: TOptionHoverProps) {
     <HoverCardPortal>
       <HoverCardContent side={side} className="z-[999] w-80">
         <div className="space-y-2">
-          <p className="text-sm text-gray-600 dark:text-gray-300">{localize(text)}</p>
+          <p className="text-sm text-text-secondary">{localize(text)}</p>
         </div>
       </HoverCardContent>
     </HoverCardPortal>

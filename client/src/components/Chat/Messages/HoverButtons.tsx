@@ -1,50 +1,190 @@
-import { useState } from 'react';
-import type { TConversation, TMessage } from 'librechat-data-provider';
-import { Clipboard, CheckMark, EditIcon, RegenerateIcon, ContinueIcon } from '~/components/svg';
+import React, { useState, useMemo, useCallback, memo } from 'react';
+import { Copy, Check } from 'lucide';
+import { useAtomValue } from 'jotai';
+import { useRecoilState } from 'recoil';
+import { revealedQueuedTurnFamily } from '@librechat/chat/react';
+import { getSpeechText, findMessageById, isUserInitiatedCompaction } from 'librechat-data-provider';
+import {
+  Button,
+  EditIcon,
+  MorphIcon,
+  ContinueIcon,
+  TooltipAnchor,
+  RegenerateIcon,
+} from '@librechat/client';
+import type { TConversation, TMessage, TFeedback } from 'librechat-data-provider';
+import { useMessagesIsSubmitting, useOptionalMessagesOperations } from '~/Providers';
 import { useGenerationsByLatest, useLocalize } from '~/hooks';
+import { hasEditablePart } from './Content/editableParts';
+import { Fork } from '~/components/Conversations';
+import { hoverButtonClasses } from './styles';
+import MessageAudio from './MessageAudio';
+import Feedback from './Feedback';
 import { cn } from '~/utils';
+import store from '~/store';
 
 type THoverButtons = {
   isEditing: boolean;
   enterEdit: (cancel?: boolean) => void;
   copyToClipboard: (setIsCopied: React.Dispatch<React.SetStateAction<boolean>>) => void;
+  getCanCopy: () => boolean;
   conversation: TConversation | null;
-  isSubmitting: boolean;
   message: TMessage;
   regenerate: () => void;
   handleContinue: (e: React.MouseEvent<HTMLButtonElement>) => void;
-  latestMessage: TMessage | null;
+  /** The tail as of the row's last render, which the row re-renders on whenever
+   *  this message enters or leaves it; compared against, never sent anywhere. */
+  latestMessageId?: string;
+  /** The tail at call time, for actions that send it (forking at a split target). */
+  getLatestMessageId?: () => string | undefined;
   isLast: boolean;
+  index: number;
+  handleFeedback?: ({ feedback }: { feedback: TFeedback | undefined }) => void;
 };
 
-export default function HoverButtons({
+type HoverButtonProps = {
+  id?: string;
+  onClick: (e?: React.MouseEvent<HTMLButtonElement>) => void;
+  title: string;
+  icon: React.ReactNode;
+  isActive?: boolean;
+  isLast?: boolean;
+  className?: string;
+  buttonStyle?: string;
+  dataTestId?: string;
+  disabled?: boolean;
+};
+
+const HoverButton = memo(
+  ({
+    id,
+    onClick,
+    title,
+    icon,
+    isActive = false,
+    isLast = false,
+    className = '',
+    dataTestId,
+    disabled = false,
+  }: HoverButtonProps) => {
+    const buttonStyle = hoverButtonClasses({ isActive, isLast, className });
+
+    return (
+      <TooltipAnchor
+        description={title}
+        render={
+          <Button
+            variant="ghost"
+            size="icon"
+            id={id}
+            data-testid={dataTestId}
+            aria-label={title}
+            className={buttonStyle}
+            onClick={onClick}
+            disabled={disabled}
+          >
+            {icon}
+          </Button>
+        }
+      />
+    );
+  },
+);
+
+HoverButton.displayName = 'HoverButton';
+
+const HoverButtons = ({
+  index,
   isEditing,
   enterEdit,
   copyToClipboard,
+  getCanCopy,
   conversation,
-  isSubmitting,
   message,
   regenerate,
   handleContinue,
-  latestMessage,
+  latestMessageId,
+  getLatestMessageId,
   isLast,
-}: THoverButtons) {
+  handleFeedback,
+}: THoverButtons) => {
   const localize = useLocalize();
-  const { endpoint: _endpoint, endpointType } = conversation ?? {};
-  const endpoint = endpointType ?? _endpoint;
+  /** Subscribed here rather than passed down: a send toggles the rerun controls on
+   *  every row, and only this toolbar has to re-render for it. */
+  const isSubmitting = useMessagesIsSubmitting();
   const [isCopied, setIsCopied] = useState(false);
-  const { hideEditButton, regenerateEnabled, continueSupported } = useGenerationsByLatest({
+  const [TextToSpeech] = useRecoilState<boolean>(store.textToSpeech);
+  const { getMessages } = useOptionalMessagesOperations();
+  const pendingReveal = useAtomValue(revealedQueuedTurnFamily(conversation?.conversationId ?? ''));
+
+  const endpoint = useMemo(() => {
+    if (!conversation) {
+      return '';
+    }
+    return conversation.endpointType ?? conversation.endpoint;
+  }, [conversation]);
+
+  /** Which turn a rerun would replay, resolved for a model turn only. The lookup
+   *  goes through the messages array's memoized id index, so a conversation is
+   *  indexed once for all its rows rather than scanned once per row, and the memo
+   *  is keyed on the parent id: `getMessages` is a cache read, not a subscription,
+   *  and a parent's authorship never changes. Outside the messages view (a search
+   *  row) the thread is unavailable and the answer stays unknown; with the thread
+   *  in hand a parent that does not resolve is absent — an imported reply the
+   *  lineage left at the root — and there is no turn to replay, which `regenerate`
+   *  can only log about once the button is pressed. */
+  const parentIsUserMessage = useMemo(() => {
+    if (message.isCreatedByUser === true) {
+      return undefined;
+    }
+    const messages = getMessages();
+    if (messages == null) {
+      return undefined;
+    }
+    return findMessageById(messages, message.parentMessageId)?.isCreatedByUser === true;
+  }, [getMessages, message.isCreatedByUser, message.parentMessageId]);
+
+  /** Resolved only if the row has nothing to replay, because the artifact check
+   *  inside parses markdown. */
+  const getHasEditablePart = useCallback(() => hasEditablePart(message), [message]);
+
+  /** A pending queued follow-up is a generation about to start: no rerun or
+   *  continuation may race it, exactly as while a run is submitting. */
+  const generationCapabilities = useGenerationsByLatest({
     isEditing,
-    isSubmitting,
-    message,
+    isSubmitting: isSubmitting || pendingReveal != null,
+    error: message.error,
     endpoint: endpoint ?? '',
-    latestMessage,
+    messageId: message.messageId,
+    searchResult: message.searchResult,
+    finish_reason: message.finish_reason,
+    isCreatedByUser: message.isCreatedByUser,
+    getHasEditablePart,
+    parentIsUserMessage,
+    isUserInitiatedCompaction: isUserInitiatedCompaction(message),
+    latestMessageId: latestMessageId,
   });
+
+  const {
+    hideEditButton,
+    regenerateEnabled,
+    continueSupported,
+    forkingSupported,
+    isActiveStreamingMessage,
+    isEditableEndpoint,
+  } = generationCapabilities;
+
+  const canCopy = useMemo(
+    () => !isActiveStreamingMessage && getCanCopy(),
+    [isActiveStreamingMessage, getCanCopy],
+  );
+
   if (!conversation) {
     return null;
   }
 
-  const { isCreatedByUser } = message;
+  const { isCreatedByUser, error } = message;
+  const isSubagentThreadReadOnly = conversation.subagentThread != null;
 
   const onEdit = () => {
     if (isEditing) {
@@ -53,59 +193,104 @@ export default function HoverButtons({
     enterEdit();
   };
 
+  const handleCopy = () => copyToClipboard(setIsCopied);
+  const speechText = getSpeechText(message);
+
   return (
-    <div className="visible mt-0 flex justify-center gap-1 self-end text-gray-400 lg:justify-start">
-      <button
-        className={cn(
-          'hover-button rounded-md p-1 text-gray-400 hover:text-gray-900 dark:text-gray-400/70 dark:hover:text-gray-200 disabled:dark:hover:text-gray-400 md:group-hover:visible md:group-[.final-completion]:visible',
-          isCreatedByUser ? '' : 'active',
-          hideEditButton ? 'opacity-0' : '',
-          isEditing ? 'active bg-gray-200 text-gray-700 dark:bg-gray-700 dark:text-gray-200' : '',
-          !isLast ? 'md:opacity-0 md:group-hover:opacity-100' : '',
-        )}
-        onClick={onEdit}
-        type="button"
-        title={localize('com_ui_edit')}
-        disabled={hideEditButton}
-      >
-        <EditIcon />
-      </button>
-      <button
-        className={cn(
-          'ml-0 flex items-center gap-1.5 rounded-md p-1 text-xs hover:text-gray-900 dark:text-gray-400/70 dark:hover:text-gray-200 disabled:dark:hover:text-gray-400 md:group-hover:visible md:group-[.final-completion]:visible',
-          isSubmitting && isCreatedByUser ? 'md:opacity-0 md:group-hover:opacity-100' : '',
-          !isLast ? 'md:opacity-0 md:group-hover:opacity-100' : '',
-        )}
-        onClick={() => copyToClipboard(setIsCopied)}
-        type="button"
-        title={
-          isCopied ? localize('com_ui_copied_to_clipboard') : localize('com_ui_copy_to_clipboard')
-        }
-      >
-        {isCopied ? <CheckMark /> : <Clipboard />}
-      </button>
-      {regenerateEnabled ? (
-        <button
-          className={cn("hover-button active rounded-md p-1 text-gray-400 hover:text-gray-900 dark:text-gray-400/70 dark:hover:text-gray-200 disabled:dark:hover:text-gray-400 md:invisible md:group-hover:visible md:group-[.final-completion]:visible",
-            !isLast ? 'md:opacity-0 md:group-hover:opacity-100' : '',)}
+    <div className="group visible flex justify-center gap-0.5 self-end focus-within:outline-hidden lg:justify-start">
+      {/* Text to Speech */}
+      {TextToSpeech && !error && !isActiveStreamingMessage && speechText.length > 0 && (
+        <MessageAudio
+          index={index}
+          isLast={isLast}
+          messageId={message.messageId}
+          content={speechText}
+          renderButton={(props) => (
+            <HoverButton
+              onClick={props.onClick}
+              title={props.title}
+              icon={props.icon}
+              isActive={props.isActive}
+              isLast={isLast}
+              dataTestId={isLast && !isCreatedByUser ? 'read-aloud-button' : undefined}
+            />
+          )}
+        />
+      )}
+
+      {/* Copy Button */}
+      {!isActiveStreamingMessage && (
+        <HoverButton
+          onClick={handleCopy}
+          title={
+            isCopied ? localize('com_ui_copied_to_clipboard') : localize('com_ui_copy_to_clipboard')
+          }
+          icon={<MorphIcon icon={isCopied ? Check : Copy} size="1.1875rem" />}
+          isLast={isLast}
+          disabled={!canCopy}
+          className={cn(
+            'ms-0 flex items-center gap-1.5 text-xs',
+            isSubmitting && isCreatedByUser ? 'no-touch:opacity-0 group-hover:opacity-100' : '',
+          )}
+          dataTestId={!isCreatedByUser ? 'copy-response-button' : undefined}
+        />
+      )}
+
+      {/* Edit Button */}
+      {!isSubagentThreadReadOnly && isEditableEndpoint && !hideEditButton && (
+        <HoverButton
+          id={`edit-${message.messageId}`}
+          onClick={onEdit}
+          title={localize('com_ui_edit')}
+          icon={<EditIcon size="19" />}
+          isActive={isEditing}
+          isLast={isLast}
+          className={isCreatedByUser ? '' : 'active'}
+        />
+      )}
+
+      {/* Fork Button: withheld on a failed turn, whose copy would carry the provider's error as an
+          ordinary answer. The error card's "Branch without files" copies up to the turn before. */}
+      {!error && !isActiveStreamingMessage && (
+        <Fork
+          messageId={message.messageId}
+          conversationId={conversation.conversationId}
+          forkingSupported={forkingSupported}
+          getLatestMessageId={getLatestMessageId ?? (() => latestMessageId)}
+          isLast={isLast}
+        />
+      )}
+
+      {/* Feedback Buttons */}
+      {!error && !isActiveStreamingMessage && !isCreatedByUser && handleFeedback != null && (
+        <Feedback handleFeedback={handleFeedback} feedback={message.feedback} isLast={isLast} />
+      )}
+
+      {/* Regenerate Button */}
+      {!isSubagentThreadReadOnly && regenerateEnabled && (
+        <HoverButton
           onClick={regenerate}
-          type="button"
           title={localize('com_ui_regenerate')}
-        >
-          <RegenerateIcon className="hover:text-gray-700 dark:hover:bg-gray-700 dark:hover:text-gray-200 disabled:dark:hover:text-gray-400" />
-        </button>
-      ) : null}
-      {continueSupported ? (
-        <button
-          className={cn("hover-button active rounded-md p-1 hover:bg-gray-200 hover:text-gray-700 dark:text-gray-400/70 dark:hover:bg-gray-700 dark:hover:text-gray-200 disabled:dark:hover:text-gray-400 md:invisible md:group-hover:visible ",
-            !isLast ? 'md:opacity-0 md:group-hover:opacity-100' : '',)}
-          onClick={handleContinue}
-          type="button"
+          icon={<RegenerateIcon size="19" />}
+          isLast={isLast}
+          dataTestId={isLast ? 'regenerate-generation-button' : undefined}
+          className="active"
+        />
+      )}
+
+      {/* Continue Button */}
+      {!isSubagentThreadReadOnly && continueSupported && (
+        <HoverButton
+          onClick={(e) => e && handleContinue(e)}
           title={localize('com_ui_continue')}
-        >
-          <ContinueIcon className="h-4 w-4 hover:text-gray-700 dark:hover:bg-gray-700 dark:hover:text-gray-200 disabled:dark:hover:text-gray-400" />
-        </button>
-      ) : null}
+          icon={<ContinueIcon className="size-4.75" />}
+          isLast={isLast}
+          dataTestId={isLast ? 'continue-generation-button' : undefined}
+          className="active"
+        />
+      )}
     </div>
   );
-}
+};
+
+export default memo(HoverButtons);

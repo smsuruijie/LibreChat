@@ -1,29 +1,27 @@
-const path = require('path');
 const { klona } = require('klona');
+const { sleep } = require('@librechat/agents');
+const { sendEvent } = require('@librechat/api');
+const { logger } = require('@librechat/data-schemas');
 const {
   StepTypes,
-  RunStatus,
   StepStatus,
-  FilePurpose,
   ContentTypes,
   ToolCallTypes,
-  imageExtRegex,
   imageGenTools,
   EModelEndpoint,
-  defaultOrderQuery,
 } = require('librechat-data-provider');
 const { retrieveAndProcessFile } = require('~/server/services/Files/process');
-const { RunManager, waitForRun } = require('~/server/services/Runs');
 const { processRequiredActions } = require('~/server/services/ToolService');
-const { createOnProgress, sendMessage, sleep } = require('~/server/utils');
+const { RunManager, waitForRun } = require('~/server/services/Runs');
+const { processMessages } = require('~/server/services/Threads');
+const { createOnProgress } = require('~/server/utils');
 const { TextStream } = require('~/app/clients');
-const { logger } = require('~/config');
 
 /**
  * Sorts, processes, and flattens messages to a single string.
  *
  * @param {Object} params - Params for creating the onTextProgress function.
- * @param {OpenAIClient} params.openai - The OpenAI client instance.
+ * @param {OpenAI} params.openai - The OpenAI SDK client instance.
  * @param {string} params.conversationId - The current conversation ID.
  * @param {string} params.userMessageId - The user message ID; response's `parentMessageId`.
  * @param {string} params.messageId - The response message ID.
@@ -65,47 +63,16 @@ async function createOnTextProgress({
       conversationId,
     };
 
-    logger.debug('Content data:', contentData);
-    sendMessage(openai.res, contentData);
-  };
-}
-
-/**
- * Retrieves the response from an OpenAI run.
- *
- * @param {Object} params - The parameters for getting the response.
- * @param {OpenAIClient} params.openai - The OpenAI client instance.
- * @param {string} params.run_id - The ID of the run to get the response for.
- * @param {string} params.thread_id - The ID of the thread associated with the run.
- * @return {Promise<OpenAIAssistantFinish | OpenAIAssistantAction[] | ThreadMessage[] | RequiredActionFunctionToolCall[]>}
- */
-async function getResponse({ openai, run_id, thread_id }) {
-  const run = await waitForRun({ openai, run_id, thread_id, pollIntervalMs: 500 });
-
-  if (run.status === RunStatus.COMPLETED) {
-    const messages = await openai.beta.threads.messages.list(thread_id, defaultOrderQuery);
-    const newMessages = messages.data.filter((msg) => msg.run_id === run_id);
-
-    return newMessages;
-  } else if (run.status === RunStatus.REQUIRES_ACTION) {
-    const actions = [];
-    run.required_action?.submit_tool_outputs.tool_calls.forEach((item) => {
-      const functionCall = item.function;
-      const args = JSON.parse(functionCall.arguments);
-      actions.push({
-        tool: functionCall.name,
-        toolInput: args,
-        toolCallId: item.id,
-        run_id,
-        thread_id,
-      });
+    logger.debug('Assistant content event', {
+      index,
+      type,
+      hasContent: data[type] != null,
+      messageId,
+      thread_id,
+      conversationId,
     });
-
-    return actions;
-  }
-
-  const runInfo = JSON.stringify(run, null, 2);
-  throw new Error(`Unexpected run status ${run.status}.\nFull run info:\n\n${runInfo}`);
+    sendEvent(openai.res, contentData);
+  };
 }
 
 /**
@@ -162,7 +129,7 @@ function hasToolCallChanged(previousCall, currentCall) {
  * Creates a handler function for steps in progress, specifically for
  * processing messages and managing seen completed messages.
  *
- * @param {OpenAIClient} openai - The OpenAI client instance.
+ * @param {OpenAI} openai - The OpenAI SDK client instance.
  * @param {string} thread_id - The ID of the thread the run is in.
  * @param {ThreadMessage[]} messages - The accumulated messages for the run.
  * @return {InProgressFunction} a function to handle steps in progress.
@@ -230,17 +197,13 @@ function createInProgressHandler(openai, thread_id, messages) {
             const { file_id } = output.image;
             const file = await retrieveAndProcessFile({
               openai,
+              client: openai,
               file_id,
               basename: `${file_id}.png`,
             });
-            // toolCall.asset_pointer = file.filepath;
-            const prelimImage = {
-              file_id,
-              filename: path.basename(file.filepath),
-              filepath: file.filepath,
-              height: file.height,
-              width: file.width,
-            };
+
+            const prelimImage = file;
+
             // check if every key has a value before adding to content
             const prelimImageKeys = Object.keys(prelimImage);
             const validImageFile = prelimImageKeys.every((key) => prelimImage[key]);
@@ -285,7 +248,7 @@ function createInProgressHandler(openai, thread_id, messages) {
 
       openai.seenCompletedMessages.add(message_id);
 
-      const message = await openai.beta.threads.messages.retrieve(thread_id, message_id);
+      const message = await openai.beta.threads.messages.retrieve(message_id, { thread_id });
       if (!message?.content?.length) {
         return;
       }
@@ -299,7 +262,7 @@ function createInProgressHandler(openai, thread_id, messages) {
         openai.index++;
       }
 
-      const result = await processMessages(openai, [message]);
+      const result = await processMessages({ openai, client: openai, messages: [message] });
       openai.addContentData({
         [ContentTypes.TEXT]: { value: result.text },
         type: ContentTypes.TEXT,
@@ -318,8 +281,8 @@ function createInProgressHandler(openai, thread_id, messages) {
         res: openai.res,
         index: messageIndex,
         messageId: openai.responseMessage.messageId,
+        conversationId: openai.responseMessage.conversationId,
         type: ContentTypes.TEXT,
-        stream: true,
         thread_id,
       });
 
@@ -338,7 +301,7 @@ function createInProgressHandler(openai, thread_id, messages) {
  * Initializes a RunManager with handlers, then invokes waitForRun to monitor and manage an OpenAI run.
  *
  * @param {Object} params - The parameters for managing and monitoring the run.
- * @param {OpenAIClient} params.openai - The OpenAI client instance.
+ * @param {OpenAI} params.openai - The OpenAI SDK client instance.
  * @param {string} params.run_id - The ID of the run to manage and monitor.
  * @param {string} params.thread_id - The ID of the thread associated with the run.
  * @param {RunStep[]} params.accumulatedSteps - The accumulated steps for the run.
@@ -354,6 +317,7 @@ async function runAssistant({
   accumulatedMessages = [],
   in_progress: inProgress,
 }) {
+  const appConfig = openai.req.config;
   let steps = accumulatedSteps;
   let messages = accumulatedMessages;
   const in_progress = inProgress ?? createInProgressHandler(openai, thread_id, messages);
@@ -365,14 +329,6 @@ async function runAssistant({
       logger.debug(`[runAssistant] Final step for ${run_id} with status ${runStatus}`, step);
 
       const promises = [];
-      // promises.push(
-      //   openai.beta.threads.messages.list(thread_id, defaultOrderQuery),
-      // );
-
-      // const finalSteps = stepsByStatus[runStatus];
-      // for (const stepPromise of finalSteps) {
-      //   promises.push(stepPromise);
-      // }
 
       // loop across all statuses
       for (const [_status, stepsPromises] of Object.entries(stepsByStatus)) {
@@ -391,16 +347,15 @@ async function runAssistant({
         }
       }
       await in_progress({ step });
-      // const res = resolved.shift();
-      // messages = messages.concat(res.data.filter((msg) => msg && msg.run_id === run_id));
       resolved.push(step);
       /* Note: no issues without deep cloning, but it's safer to do so */
       steps = klona(finalSteps);
     },
   });
 
-  /** @type {TCustomConfig.endpoints.assistants} */
-  const assistantsEndpointConfig = openai.req.app.locals?.[EModelEndpoint.assistants] ?? {};
+  const { endpoint = EModelEndpoint.azureAssistants } = openai.req.body;
+  /** @type {AppConfig['endpoints']['assistants']} */
+  const assistantsEndpointConfig = appConfig.endpoints?.[endpoint] ?? {};
   const { pollIntervalMs, timeoutMs } = assistantsEndpointConfig;
 
   const run = await waitForRun({
@@ -413,10 +368,14 @@ async function runAssistant({
   });
 
   if (!run.required_action) {
-    // const { messages: sortedMessages, text } = await processMessages(openai, messages);
-    // return { run, steps, messages: sortedMessages, text };
     const sortedMessages = messages.sort((a, b) => a.created_at - b.created_at);
-    return { run, steps, messages: sortedMessages };
+    return {
+      run,
+      steps,
+      messages: sortedMessages,
+      finalMessage: openai.responseMessage,
+      text: openai.responseText,
+    };
   }
 
   const { submit_tool_outputs } = run.required_action;
@@ -432,9 +391,11 @@ async function runAssistant({
     };
   });
 
-  const outputs = await processRequiredActions(openai, actions);
-
-  const toolRun = await openai.beta.threads.runs.submitToolOutputs(run.thread_id, run.id, outputs);
+  const tool_outputs = await processRequiredActions(openai, actions);
+  const toolRun = await openai.beta.threads.runs.submitToolOutputs(run.id, {
+    thread_id: run.thread_id,
+    tool_outputs,
+  });
 
   // Recursive call with accumulated steps and messages
   return await runAssistant({
@@ -447,98 +408,7 @@ async function runAssistant({
   });
 }
 
-/**
- * Sorts, processes, and flattens messages to a single string.
- *
- * @param {OpenAIClient} openai - The OpenAI client instance.
- * @param {ThreadMessage[]} messages - An array of messages.
- * @returns {Promise<{messages: ThreadMessage[], text: string}>} The sorted messages and the flattened text.
- */
-async function processMessages(openai, messages = []) {
-  const sorted = messages.sort((a, b) => a.created_at - b.created_at);
-
-  let text = '';
-  for (const message of sorted) {
-    message.files = [];
-    for (const content of message.content) {
-      const processImageFile =
-        content.type === 'image_file' && !openai.processedFileIds.has(content.image_file?.file_id);
-      if (processImageFile) {
-        const { file_id } = content.image_file;
-
-        const file = await retrieveAndProcessFile({ openai, file_id, basename: `${file_id}.png` });
-        openai.processedFileIds.add(file_id);
-        message.files.push(file);
-        continue;
-      }
-
-      text += (content.text?.value ?? '') + ' ';
-      logger.debug('[processMessages] Processing message:', { value: text });
-
-      // Process annotations if they exist
-      if (!content.text?.annotations?.length) {
-        continue;
-      }
-
-      logger.debug('[processMessages] Processing annotations:', content.text.annotations);
-      for (const annotation of content.text.annotations) {
-        logger.debug('Current annotation:', annotation);
-        let file;
-        const processFilePath =
-          annotation.file_path && !openai.processedFileIds.has(annotation.file_path?.file_id);
-
-        if (processFilePath) {
-          const basename = imageExtRegex.test(annotation.text)
-            ? path.basename(annotation.text)
-            : null;
-          file = await retrieveAndProcessFile({
-            openai,
-            file_id: annotation.file_path.file_id,
-            basename,
-          });
-          openai.processedFileIds.add(annotation.file_path.file_id);
-        }
-
-        const processFileCitation =
-          annotation.file_citation &&
-          !openai.processedFileIds.has(annotation.file_citation?.file_id);
-
-        if (processFileCitation) {
-          file = await retrieveAndProcessFile({
-            openai,
-            file_id: annotation.file_citation.file_id,
-            unknownType: true,
-          });
-          openai.processedFileIds.add(annotation.file_citation.file_id);
-        }
-
-        if (!file && (annotation.file_path || annotation.file_citation)) {
-          const { file_id } = annotation.file_citation || annotation.file_path || {};
-          file = await retrieveAndProcessFile({ openai, file_id, unknownType: true });
-          openai.processedFileIds.add(file_id);
-        }
-
-        if (!file) {
-          continue;
-        }
-
-        if (file.purpose && file.purpose === FilePurpose.Assistants) {
-          text = text.replace(annotation.text, file.filename);
-        } else if (file.filepath) {
-          text = text.replace(annotation.text, file.filepath);
-        }
-
-        message.files.push(file);
-      }
-    }
-  }
-
-  return { messages: sorted, text };
-}
-
 module.exports = {
-  getResponse,
   runAssistant,
-  processMessages,
   createOnTextProgress,
 };

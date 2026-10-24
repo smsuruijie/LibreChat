@@ -1,12 +1,21 @@
+import { Button } from '@librechat/client';
+import { ChevronLeft, ChevronRight } from 'lucide-react';
 import type { TMessageProps } from '~/common';
+import { useLocalize } from '~/hooks';
+import { cn } from '~/utils';
 
-type TSiblingSwitchProps = Pick<TMessageProps, 'siblingIdx' | 'siblingCount' | 'setSiblingIdx'>;
+type TSiblingSwitchProps = Pick<TMessageProps, 'siblingIdx' | 'siblingCount' | 'setSiblingIdx'> & {
+  className?: string;
+};
 
 export default function SiblingSwitch({
   siblingIdx,
   siblingCount,
   setSiblingIdx,
+  className,
 }: TSiblingSwitchProps) {
+  const localize = useLocalize();
+
   if (siblingIdx === undefined) {
     return null;
   } else if (siblingCount === undefined) {
@@ -21,51 +30,49 @@ export default function SiblingSwitch({
     setSiblingIdx && setSiblingIdx(siblingIdx + 1);
   };
 
+  const buttonStyle = cn(
+    'hover-button',
+    'group-hover:visible group-focus-visible:visible group-has-[:focus-visible:not(:is(input,textarea,[contenteditable]))]:visible group-[.final-completion]:visible',
+  );
+
   return siblingCount > 1 ? (
-    <div className="visible flex items-center justify-center gap-1 self-center pt-0 text-xs">
-      <button
-        className="disabled:text-gray-300 dark:text-white dark:disabled:text-gray-400"
+    <nav
+      className={cn(
+        'visible flex items-center justify-center gap-2 self-center pt-0 text-xs',
+        className,
+      )}
+      aria-label={localize('com_ui_sibling_navigation')}
+    >
+      <Button
+        variant="message-action"
+        className={buttonStyle}
         onClick={previous}
         disabled={siblingIdx == 0}
+        aria-label={localize('com_ui_previous_sibling')}
+        aria-disabled={siblingIdx == 0}
       >
-        <svg
-          stroke="currentColor"
-          fill="none"
-          strokeWidth="1.5"
-          viewBox="0 0 24 24"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-          className="h-3 w-3"
-          height="1em"
-          width="1em"
-          xmlns="http://www.w3.org/2000/svg"
-        >
-          <polyline points="15 18 9 12 15 6" />
-        </svg>
-      </button>
-      <span className="flex-shrink-0 flex-grow tabular-nums">
-        {siblingIdx + 1} / {siblingCount}
+        <ChevronLeft size="19" className="rtl:-scale-x-100" aria-hidden="true" />
+      </Button>
+      <span
+        className="shrink-0 grow tabular-nums"
+        aria-live="polite"
+        aria-atomic="true"
+        role="status"
+      >
+        <bdi>
+          {siblingIdx + 1} / {siblingCount}
+        </bdi>
       </span>
-      <button
-        className="disabled:text-gray-300 dark:text-white dark:disabled:text-gray-400"
+      <Button
+        variant="message-action"
+        className={buttonStyle}
         onClick={next}
         disabled={siblingIdx == siblingCount - 1}
+        aria-label={localize('com_ui_next_sibling')}
+        aria-disabled={siblingIdx == siblingCount - 1}
       >
-        <svg
-          stroke="currentColor"
-          fill="none"
-          strokeWidth="1.5"
-          viewBox="0 0 24 24"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-          className="h-3 w-3"
-          height="1em"
-          width="1em"
-          xmlns="http://www.w3.org/2000/svg"
-        >
-          <polyline points="9 18 15 12 9 6" />
-        </svg>
-      </button>
-    </div>
+        <ChevronRight size="19" className="rtl:-scale-x-100" aria-hidden="true" />
+      </Button>
+    </nav>
   ) : null;
 }
